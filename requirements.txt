@@ -1,9 +1,17 @@
 # LangChain Core
 langchain==0.1.0
 langchain-community==0.0.13
+langchain-openai==0.0.5
+langgraph==0.0.20
 
 # Alibaba Cloud Tongyi Qianwen
 dashscope==1.14.1
+
+# Database
+psycopg2-binary==2.9.9
+
+# Web Framework
+flask==3.0.0
 
 # Tools & Utilities
 python-dotenv==1.0.0
