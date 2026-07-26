@@ -1,0 +1,17 @@
+# -*- coding: utf-8 -*-
+"""
+健康检查路由
+"""
+
+from fastapi import APIRouter
+
+health_router = APIRouter()
+
+
+@health_router.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return {
+        "status": "ok",
+        "service": "LangGraph Agent Demo",
+    }
