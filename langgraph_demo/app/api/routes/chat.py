@@ -3,11 +3,12 @@
 对话路由
 
 提供阻塞式和流式对话接口
+支持单 Agent 和多 Agent 协作模式
 """
 
 import json
 import uuid
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Query
 from fastapi.responses import StreamingResponse
 
 from app.schemas.chat import ChatRequest, ChatResponse, StreamChunk
@@ -22,22 +23,27 @@ chat_router = APIRouter()
 @chat_router.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
-    conversation_id: str = Header(None, alias="X-Conversation-ID")
+    conversation_id: str = Header(None, alias="X-Conversation-ID"),
+    mode: str = Query("single", description="模式: single(单Agent) / multi(多Agent协作)")
 ):
     """
     阻塞式对话接口
     
     - 等待 Agent 完整执行后返回结果
     - 支持对话记忆（通过 conversation_id）
+    - 支持单 Agent 和多 Agent 协作模式
     """
     # 如果没有提供 conversation_id，生成一个
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
     
-    logger.info(f"收到对话请求，conversation_id: {conversation_id}")
+    logger.info(f"收到对话请求，conversation_id: {conversation_id}, mode: {mode}")
     
-    # 调用服务
-    result = await agent_service.chat(request, conversation_id)
+    # 根据模式调用不同服务
+    if mode == "multi":
+        result = await agent_service.chat_multi(request, conversation_id)
+    else:
+        result = await agent_service.chat(request, conversation_id)
     
     return ChatResponse(
         content=result["content"],
@@ -49,7 +55,8 @@ async def chat(
 @chat_router.post("/chat/stream")
 async def chat_stream(
     request: ChatRequest,
-    conversation_id: str = Header(None, alias="X-Conversation-ID")
+    conversation_id: str = Header(None, alias="X-Conversation-ID"),
+    mode: str = Query("single", description="模式: single(单Agent) / multi(多Agent协作)")
 ):
     """
     流式对话接口
@@ -62,12 +69,18 @@ async def chat_stream(
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
     
-    logger.info(f"收到流式对话请求，conversation_id: {conversation_id}")
+    logger.info(f"收到流式对话请求，conversation_id: {conversation_id}, mode: {mode}")
     
     async def generate():
         """生成 SSE 数据流"""
         try:
-            async for chunk in agent_service.chat_stream(request, conversation_id):
+            # 根据模式选择流式生成方式
+            if mode == "multi":
+                stream_gen = agent_service.chat_stream_multi(request, conversation_id)
+            else:
+                stream_gen = agent_service.chat_stream(request, conversation_id)
+            
+            async for chunk in stream_gen:
                 # 转换为 StreamChunk 模型
                 stream_chunk = StreamChunk(**chunk)
                 # 序列化为 JSON

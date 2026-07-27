@@ -36,6 +36,7 @@ class Settings:
         "http://localhost:3000",
         "http://localhost:8080",
         "http://localhost:5500",
+        "http://localhost:5173",
     ]
 
     # ---- LLM 配置 ----
@@ -51,6 +52,18 @@ class Settings:
     DEFAULT_PROVIDER: str = os.getenv("DEFAULT_PROVIDER", "dashscope")  # 默认 LLM 提供商
     MAX_ITERATIONS: int = 10           # Agent 最大思考轮数
     TEMPERATURE: float = 0.7           # 默认温度
+
+    # ---- 人机协作配置 ----
+    ENABLE_HUMAN_REVIEW: bool = os.getenv("ENABLE_HUMAN_REVIEW", "false").lower() == "true"
+
+    # ---- 记忆配置 ----
+    MEMORY_BACKEND: str = os.getenv("MEMORY_BACKEND", "memory")  # memory / sqlite
+    SQLITE_DB_PATH: str = os.getenv("SQLITE_DB_PATH", "data/memory.db")
+
+    # ---- 工具配置 ----
+    USE_REAL_API: bool = os.getenv("USE_REAL_API", "true").lower() == "true"
+    WEATHER_API_KEY: str = os.getenv("WEATHER_API_KEY", "")
+    SEARCH_MAX_RESULTS: int = int(os.getenv("SEARCH_MAX_RESULTS", "5"))
 
 
 # 全局配置实例
