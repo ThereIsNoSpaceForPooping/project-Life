@@ -258,6 +258,55 @@ def tool_node(state: AgentState) -> dict:
 
 
 # ============================================================
+# 节点3: 人机协作节点（Human-in-the-Loop）
+# ============================================================
+def human_review_node(state: AgentState) -> dict:
+    """
+    人机协作节点 - 等待人工审核
+    
+    当 Agent 需要执行敏感操作时，暂停执行等待人工确认。
+    配合 LangGraph 的 interrupt_before 使用。
+    
+    流程:
+        1. 检查 state 中是否有待审核的工具调用
+        2. 如果有，标记为需要审核
+        3. 人工审核后，通过 Command(resume=...) 恢复执行
+    
+    Args:
+        state: 当前状态
+    
+    Returns:
+        dict: 更新后的状态
+    
+    学习要点：
+    - 人机协作是企业级应用的重要特性
+    - 可以防止 Agent 执行危险操作
+    - 配合 interrupt_before 实现暂停/恢复
+    """
+    logger.info("执行人机协作节点 - 等待人工审核")
+    
+    messages = state.get("messages", [])
+    last_message = messages[-1] if messages else None
+    
+    # 检查是否需要人工审核
+    if last_message and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        # 标记需要审核的工具调用
+        pending_tools = [tc["name"] for tc in last_message.tool_calls]
+        logger.info(f"等待人工审核工具调用: {pending_tools}")
+        
+        return {
+            "current_step": "human_review",
+            "messages": [
+                AIMessage(
+                    content=f"⚠️ 需要人工确认以下操作: {', '.join(pending_tools)}"
+                )
+            ],
+        }
+    
+    return {"current_step": "human_review_passed"}
+
+
+# ============================================================
 # 路由函数
 # ============================================================
 def should_continue(state: AgentState) -> str:
@@ -287,4 +336,34 @@ def should_continue(state: AgentState) -> str:
         return "tools"
     
     # 否则结束
+    return "end"
+
+
+def should_review(state: AgentState) -> str:
+    """
+    判断是否需要人工审核
+    
+    路由规则:
+        - 有 tool_calls 且启用审核 → 路由到 "human_review"
+        - 否则 → 路由到 "tools" 直接执行
+    
+    Args:
+        state: 当前状态
+    
+    Returns:
+        str: 下一个节点名称 ("human_review" 或 "tools" 或 "end")
+    
+    学习要点：
+    - 根据配置动态切换路由
+    - 支持基础模式和人机协作模式
+    """
+    messages = state.get("messages", [])
+    last_message = messages[-1] if messages else None
+    
+    if last_message and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        # 检查是否启用人工审核
+        if settings.ENABLE_HUMAN_REVIEW:
+            return "human_review"
+        return "tools"
+    
     return "end"

@@ -1,0 +1,13 @@
+# A2A Server 依赖
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# LLM 依赖
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.10
+
+# HTTP 客户端
+httpx>=0.24.0
