@@ -1,0 +1,12 @@
+=== Port Check (8001 8002 8005 3000) ===
+  TCP    0.0.0.0:8001           0.0.0.0:0              LISTENING
+  TCP    0.0.0.0:8002           0.0.0.0:0              LISTENING
+  TCP    0.0.0.0:8005           0.0.0.0:0              LISTENING
+  TCP    [::1]:3000             [::]:0                 LISTENING
+=== Process Check (python node) ===
+python.exe                   21236 Console                    1     56,104 K
+python.exe                   19792 Console                    1     90,768 K
+python.exe                   17844 Console                    1     84,228 K
+node.exe                      2708 Console                    1     54,652 K
+node.exe                     21444 Console                    1     97,028 K
+python.exe                    5480 Console                    1     93,576 K

@@ -10,10 +10,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import uuid
+import logging
 from datetime import datetime
 
 from config import Config
 from agents.registry import agent_registry
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -111,6 +119,7 @@ class AgentInfo(BaseModel):
 @app.get("/health")
 async def health_check():
     """健康检查"""
+    logger.info("收到健康检查请求")
     return {"status": "ok", "service": "a2a_server"}
 
 
@@ -139,7 +148,9 @@ async def list_agents():
     Returns:
         Agent 列表
     """
+    logger.info("收到列出 Agent 请求")
     agents = agent_registry.get_all_agents()
+    logger.info(f"返回 {len(agents)} 个 Agent")
     
     return [
         AgentInfo(
@@ -162,9 +173,12 @@ async def create_task(request: TaskRequest):
     Returns:
         任务响应
     """
+    logger.info(f"收到任务创建请求: agent={request.agent_name}, input={request.input_data}")
+    
     # 检查 Agent 是否存在
     agent = agent_registry.get_agent(request.agent_name)
     if not agent:
+        logger.error(f"Agent 不存在: {request.agent_name}")
         raise HTTPException(
             status_code=404,
             detail=f"Agent 不存在: {request.agent_name}"
@@ -172,9 +186,11 @@ async def create_task(request: TaskRequest):
     
     # 创建任务
     task = task_store.create_task(request.agent_name, request.input_data)
+    logger.info(f"任务已创建: task_id={task['id']}")
     
     # 执行任务
     task_store.update_task(task["id"], "running")
+    logger.info(f"开始执行任务: task_id={task['id']}, agent={request.agent_name}")
     
     try:
         result = await agent_registry.process_task(
@@ -182,8 +198,11 @@ async def create_task(request: TaskRequest):
             request.input_data
         )
         
+        logger.info(f"任务执行完成: task_id={task['id']}, result_keys={list(result.keys()) if isinstance(result, dict) else 'not_dict'}")
+        
         # 检查是否有错误
         if isinstance(result, dict) and "error" in result:
+            logger.error(f"任务执行失败: task_id={task['id']}, error={result['error']}")
             task_store.update_task(task["id"], "failed", result)
             return TaskResponse(
                 task_id=task["id"],
@@ -192,6 +211,7 @@ async def create_task(request: TaskRequest):
             )
         
         task_store.update_task(task["id"], "completed", result)
+        logger.info(f"任务成功完成: task_id={task['id']}")
         
         return TaskResponse(
             task_id=task["id"],
@@ -200,6 +220,7 @@ async def create_task(request: TaskRequest):
         )
     
     except Exception as e:
+        logger.error(f"任务执行异常: task_id={task['id']}, error={str(e)}", exc_info=True)
         task_store.update_task(task["id"], "failed", {"error": str(e)})
         
         return TaskResponse(

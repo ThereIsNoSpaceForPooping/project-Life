@@ -5,10 +5,14 @@ A2A Server - Agent 注册表
 集中管理所有 Agent。
 """
 
+import logging
 from agents.researcher import researcher_agent
 from agents.coder import coder_agent
 from agents.translator import translator_agent
 from agents.analyzer import analyzer_agent
+
+# 模块级 logger（修复 logger 未定义 bug）
+logger = logging.getLogger(__name__)
 
 
 class AgentRegistry:
@@ -65,14 +69,20 @@ class AgentRegistry:
         Returns:
             处理结果
         """
+        logger.info(f"[A2A] 调用 Agent: {agent_name}, 输入: {input_data}")
+        
         agent = self.get_agent(agent_name)
         
         if not agent:
+            logger.error(f"[A2A] Agent 不存在: {agent_name}")
             return {"error": f"Agent 不存在: {agent_name}"}
         
         try:
-            return await agent.process(input_data)
+            result = await agent.process(input_data)
+            logger.info(f"[A2A] Agent {agent_name} 执行成功, 返回: {result}")
+            return result
         except Exception as e:
+            logger.error(f"[A2A] Agent {agent_name} 执行失败: {str(e)}")
             return {"error": f"Agent 执行失败: {str(e)}"}
 
 

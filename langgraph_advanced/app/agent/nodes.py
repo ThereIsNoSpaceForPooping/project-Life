@@ -12,6 +12,8 @@ Agent 节点定义
 4. 使用 get_llm() 获取 LLM 实例
 """
 
+import asyncio
+import json
 import time
 from typing import List, Optional
 
@@ -19,11 +21,89 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_openai import ChatOpenAI
 
 from app.agent.state import AgentState
-from app.agent.tools import TOOLS
+from app.agent.tools import TOOLS as LOCAL_TOOLS
 from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# ============================================================
+# 工具管理器：统一管理本地工具 + MCP 动态工具
+# ============================================================
+class ToolManager:
+    """
+    工具管理器
+
+    职责：
+    1. 管理本地工具（TOOLS）和从 MCP Server 动态加载的工具
+    2. 提供统一的 get_all_tools() 接口供 Agent 绑定
+    3. 提供 find_tool() 接口供 tool_node 查找工具
+    """
+
+    def __init__(self):
+        # 本地工具（静态，启动时即固定）
+        self._local_tools = list(LOCAL_TOOLS)
+        # MCP 动态工具（启动后由 load_mcp_tools() 填充）
+        self._mcp_tools: list = []
+        # A2A 动态工具（启动后由 load_a2a_tools() 填充）
+        self._a2a_tools: list = []
+        # 合并后的工具列表（懒加载缓存）
+        self._all_tools: Optional[list] = None
+
+    def set_mcp_tools(self, mcp_tools: list) -> None:
+        """
+        设置 MCP 动态工具列表（由启动流程调用）
+
+        Args:
+            mcp_tools: 从 MCP Server 加载的 StructuredTool 列表
+        """
+        self._mcp_tools = mcp_tools
+        self._all_tools = None  # 清除缓存，下次 get_all_tools() 时重建
+
+    def set_a2a_tools(self, a2a_tools: list) -> None:
+        """
+        设置 A2A 动态工具列表（由启动流程调用）
+
+        Args:
+            a2a_tools: 从 A2A Server 加载的 StructuredTool 列表
+        """
+        self._a2a_tools = a2a_tools
+        self._all_tools = None  # 清除缓存，下次 get_all_tools() 时重建
+
+    def get_all_tools(self) -> list:
+        """
+        获取所有可用工具（本地 + MCP + A2A）
+
+        Returns:
+            合并后的工具列表
+        """
+        if self._all_tools is None:
+            self._all_tools = self._local_tools + self._mcp_tools + self._a2a_tools
+        return self._all_tools
+
+    def find_tool(self, tool_name: str):
+        """
+        根据名称查找工具
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            工具实例，未找到返回 None
+        """
+        for t in self.get_all_tools():
+            if t.name == tool_name:
+                return t
+        return None
+
+
+# 全局工具管理器实例
+tool_manager = ToolManager()
+
+
+# 向后兼容：其他模块可能直接 import TOOLS
+TOOLS = LOCAL_TOOLS
 
 
 # ============================================================
@@ -103,11 +183,12 @@ def agent_node(state: AgentState) -> dict:
     # 获取消息列表
     messages = state.get("messages", [])
     
-    # 获取 LLM 并绑定工具
+    # 获取 LLM 并绑定所有工具（本地 + MCP + A2A）
     llm = get_llm()
-    llm_with_tools = llm.bind_tools(TOOLS)
+    llm_with_tools = llm.bind_tools(tool_manager.get_all_tools())
     
     # 调用 LLM
+    logger.info(f"Agent 输入消息数: {len(messages)}")
     response = llm_with_tools.invoke(messages)
     
     # 记录工具调用
@@ -117,7 +198,19 @@ def agent_node(state: AgentState) -> dict:
             {"name": tc["name"], "args": tc["args"]}
             for tc in response.tool_calls
         ]
-        logger.info(f"LLM 请求调用工具: {tool_calls}")
+        logger.info(f"Agent 推理完成，工具调用数: {len(tool_calls)}")
+        
+        # 打印 Agent 推理内容
+        if response.content:
+            logger.info(f"Agent 推理内容: {response.content[:500]}")
+        
+        # 打印工具调用详情
+        for i, tc in enumerate(tool_calls):
+            logger.info(f"  工具调用[{i+1}]: name={tc['name']}, args={tc['args']}")
+    else:
+        logger.info(f"Agent 推理完成，无工具调用")
+        if response.content:
+            logger.info(f"Agent 最终回答: {response.content[:500]}")
     
     return {
         "messages": [response],
@@ -183,45 +276,45 @@ def _execute_tool_with_retry(tool, tool_args: dict, tool_name: str) -> str:
     return f"工具执行失败（已重试{MAX_RETRIES}次）: {str(last_error)}"
 
 
-def tool_node(state: AgentState) -> dict:
+async def tool_node(state: AgentState) -> dict:
     """
-    工具节点 - 执行工具调用（带重试）
-    
+    工具节点 - 执行工具调用（支持本地 + MCP + A2A，带重试）
+
     流程:
     1. 从最后一条 AIMessage 获取 tool_calls
-    2. 遍历每个 tool_call，查找对应工具
-    3. 使用重试机制执行工具
+    2. 遍历每个 tool_call，通过 tool_manager 查找工具
+    3. 本地工具直接调用，MCP/A2A 工具走异步 HTTP
     4. 构造 ToolMessage 列表返回
-    
+
     Args:
         state: 当前状态
-    
+
     Returns:
         dict: 状态更新（包含 ToolMessage 列表）
-    
+
     学习要点：
     - 工具执行结果封装为 ToolMessage
     - ToolMessage 包含 tool_call_id，用于关联请求和响应
     - LLM 会根据 ToolMessage 继续推理
     """
     logger.info("执行工具节点")
-    
+
     # 获取最后一条消息（应该是 AIMessage 带 tool_calls）
     messages = state.get("messages", [])
     last_message = messages[-1] if messages else None
-    
+
     if not last_message or not hasattr(last_message, "tool_calls"):
         logger.error("工具节点未找到有效的 tool_calls")
         return {"current_step": "tool_error"}
-    
+
     # 执行每个工具调用
     tool_results = []
     for tool_call in last_message.tool_calls:
         tool_name = tool_call["name"]
         tool_args = tool_call["args"]
-        
-        # 查找工具
-        tool = next((t for t in TOOLS if t.name == tool_name), None)
+
+        # 通过 tool_manager 查找工具（本地 + MCP + A2A）
+        tool = tool_manager.find_tool(tool_name)
         if not tool:
             logger.error(f"未找到工具: {tool_name}")
             tool_results.append({
@@ -230,17 +323,24 @@ def tool_node(state: AgentState) -> dict:
                 "content": f"错误: 未找到工具 '{tool_name}'",
             })
             continue
-        
-        # 带重试的工具执行
-        result = _execute_tool_with_retry(tool, tool_args, tool_name)
+
+        # 判断是否为异步工具（MCP/A2A 工具）
+        if hasattr(tool, 'coroutine') and tool.coroutine is not None:
+            # MCP/A2A 工具：走异步执行
+            result = await tool.ainvoke(tool_args)
+            logger.info(f"异步工具 {tool_name} 执行完成")
+        else:
+            # 本地工具：带重试的同步执行
+            result = _execute_tool_with_retry(tool, tool_args, tool_name)
+
         logger.info(f"工具 {tool_name} 最终结果: {result}")
-        
+
         tool_results.append({
             "tool_call_id": tool_call["id"],
             "name": tool_name,
-            "content": result,
+            "content": str(result),
         })
-    
+
     # 构造 ToolMessage 列表
     tool_messages = [
         ToolMessage(
@@ -250,7 +350,7 @@ def tool_node(state: AgentState) -> dict:
         )
         for tr in tool_results
     ]
-    
+
     return {
         "messages": tool_messages,
         "current_step": "tool",

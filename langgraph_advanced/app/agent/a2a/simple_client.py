@@ -86,6 +86,8 @@ class SimpleA2AClient:
             await self.connect()
         
         try:
+            logger.info(f"创建 A2A 任务: agent={agent_name}, data={input_data}")
+            
             response = await self._client.post(
                 f"{self.base_url}/a2a/tasks",
                 json={
@@ -93,15 +95,25 @@ class SimpleA2AClient:
                     "input_data": input_data
                 }
             )
+            
+            logger.info(f"A2A 响应状态: {response.status_code}")
             response.raise_for_status()
+            
             result = response.json()
+            logger.info(f"A2A 响应结果: {result}")
             
             logger.info(f"任务创建成功: {result.get('task_id')}")
             return result
         
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP 状态错误: {e.response.status_code} - {e.response.text}")
+            return {"error": f"HTTP {e.response.status_code}: {e.response.text}", "status": "failed"}
+        except httpx.RequestError as e:
+            logger.error(f"请求错误: {type(e).__name__} - {str(e)}")
+            return {"error": f"请求失败: {type(e).__name__}: {str(e)}", "status": "failed"}
         except Exception as e:
-            logger.error(f"创建任务失败: {e}")
-            return {"error": str(e), "status": "failed"}
+            logger.error(f"创建任务失败: {type(e).__name__} - {str(e)}", exc_info=True)
+            return {"error": f"创建失败: {type(e).__name__}: {str(e)}", "status": "failed"}
     
     async def get_task(self, task_id: str) -> Dict[str, Any]:
         """

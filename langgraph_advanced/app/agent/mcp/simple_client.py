@@ -82,6 +82,8 @@ class SimpleMCPClient:
             await self.connect()
         
         try:
+            logger.info(f"调用 MCP 工具: {tool_name}, 参数: {arguments}")
+            
             response = await self._client.post(
                 f"{self.base_url}/mcp/tools/call",
                 json={
@@ -89,8 +91,12 @@ class SimpleMCPClient:
                     "arguments": arguments
                 }
             )
+            
+            logger.info(f"MCP 响应状态: {response.status_code}")
             response.raise_for_status()
+            
             result = response.json()
+            logger.info(f"MCP 响应结果: {result}")
             
             if result.get("is_error"):
                 logger.error(f"工具调用失败: {result.get('result')}")
@@ -99,9 +105,15 @@ class SimpleMCPClient:
             logger.info(f"工具 {tool_name} 调用成功")
             return result.get("result")
         
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP 状态错误: {e.response.status_code} - {e.response.text}")
+            return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
+        except httpx.RequestError as e:
+            logger.error(f"请求错误: {type(e).__name__} - {str(e)}")
+            return {"error": f"请求失败: {type(e).__name__}: {str(e)}"}
         except Exception as e:
-            logger.error(f"调用工具 {tool_name} 失败: {e}")
-            return {"error": str(e)}
+            logger.error(f"调用工具 {tool_name} 失败: {type(e).__name__} - {str(e)}", exc_info=True)
+            return {"error": f"调用失败: {type(e).__name__}: {str(e)}"}
     
     async def health_check(self) -> bool:
         """

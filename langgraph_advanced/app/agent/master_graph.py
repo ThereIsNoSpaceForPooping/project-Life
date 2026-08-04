@@ -20,6 +20,7 @@
 - 状态中存储所有中间结果，支持时间旅行回溯
 """
 
+import json
 from typing import List, Optional, Dict, Any, Annotated
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
@@ -27,12 +28,22 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
-from app.agent.nodes import get_llm, TOOLS, tool_node
+from app.agent.nodes import get_llm, tool_manager
 from app.memory import memory_manager
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.agent.mcp.simple_client import mcp_client
 from app.agent.a2a.simple_client import a2a_client
+
+# 中间件：自研的"prebuilt 风格"工具节点 + 重复调用守卫
+# 说明：官方 langgraph.prebuilt.ToolNode 在当前 langgraph==1.1.3 + langchain-core==0.3.63
+#       组合下存在 ImportError，故采用自研兼容实现（接口与官方对齐，未来可一行替换）。
+from app.agent.middleware.prebuilt_tool_node import PrebuiltToolNode, tools_condition
+from app.agent.middleware.stuck_guard import (
+    stuck_guard_node,
+    route_after_stuck_guard,
+    DEFAULT_STUCK_THRESHOLD,
+)
 
 logger = get_logger(__name__)
 
@@ -106,7 +117,14 @@ class MasterState(TypedDict):
     # MCP 工具
     mcp_tool_calls: List[Dict]          # MCP 工具调用
     mcp_results: List[Dict]             # MCP 结果
-    
+    # 注：原 mcp_executed 字段已移除。死循环防护由 stuck_guard + max_tool_calls +
+    #     recursion_limit 三层共同负责，标记位已无存在必要。
+
+    # A2A 协作
+    a2a_task_id: Optional[str]          # A2A 任务 ID
+    a2a_result: Optional[Dict]          # A2A 结果
+    # 注：原 a2a_executed 字段已移除（理由同上）。
+
     # 人机协作
     pending_action: Optional[str]       # 待确认操作
     human_feedback: Optional[str]       # 人工反馈
@@ -116,6 +134,21 @@ class MasterState(TypedDict):
     reflection: Optional[dict]          # 反思结果
     retry_count: int                    # 重试次数
     max_retries: int                    # 最大重试次数
+    
+    # 工具调用控制
+    tool_call_count: int                # 工具调用次数（防止死循环）
+    max_tool_calls: int                 # 最大工具调用次数
+    
+    # 重复调用守卫（防抖）—— 详见 app.agent.middleware.stuck_guard
+    stuck_signature: Optional[str]      # 最近一次工具调用的稳定签名
+    stuck_count: int                    # 连续相同签名的累计次数
+    _force_skip_tools: bool             # 内部标记：stuck_guard 判定后是否强制跳过 tools 节点
+
+    # 强制工具路由（v3 —— 关键词触发）
+    # 说明：router_node 检测到特定关键词时强制注入目标工具名，
+    #       agent_node 读取后追加"必须调用该工具"的 SystemMessage，避免
+    #       LLM 自行判断"翻译是简单任务"而跳过工具调用。
+    force_tool: Optional[str]           # router 注入：强制 agent 调用的工具名（如 a2a_translator）
     
     # 最终输出
     final_response: Optional[str]       # 最终响应
@@ -171,32 +204,111 @@ def guard_input_node(state: MasterState) -> dict:
 
 
 # ============================================================
+# 关键词 → 强制工具 映射表（v3 新增，v4 扩展 MCP）
+# ============================================================
+# 作用：当用户 query 命中关键词时，router 在结果中写入 force_tool，
+#       agent_node 据此追加 SystemMessage 强制 LLM 调用对应工具。
+# 顺序：先匹配先生效（多关键词时取首个命中）。
+# 范围：覆盖 a2a_* 全量 Agent + MCP 12 个工具。
+# 设计原则：
+#   1. 关键词尽量互斥（避免歧义）；歧义时优先匹配更具体的工具。
+#   2. file_read 优先于其他文件类工具（用户常说"读 README"）。
+#   3. 关键词使用中英双语，方便国内外场景。
+FORCE_TOOL_KEYWORDS: list[tuple[tuple[str, ...], str]] = [
+    # ============= A2A Agent 类 =============
+    (("翻译", "translate", "translator"),                 "a2a_translator"),
+    (("研究", "调研", "research"),                        "a2a_researcher"),
+    (("写代码", "写个程序", "生成代码", "编程"),          "a2a_coder"),
+    (("分析", "对比", "analyze", "数据走势"),             "a2a_analyzer"),
+
+    # ============= MCP 工具类（v4 新增） =============
+    # 文件操作（注意：file_read 放在 file_write 之前，"读"比"写"更常见）
+    (("读文件", "读取", "打开文件", "查看文件", "看下文件", "显示文件", "读一下", "查看", "看看", "read file", "cat "),     "mcp_file_read"),
+    (("写文件", "写入文件", "保存文件", "write file"),                                    "mcp_file_write"),
+    (("列目录", "列出目录", "查看目录", "ls ", "dir "),                                  "mcp_file_list"),
+    (("删除文件", "remove file"),                                                          "mcp_file_delete"),
+
+    # 数据库操作（SELECT 用 db_query，INSERT/UPDATE/DELETE 用 db_execute）
+    (("查询表", "select ", "查表", "查询数据", "sql 查询"),                              "mcp_db_query"),
+    (("插入数据", "更新数据", "删除数据", "insert ", "update ", "delete from"),         "mcp_db_execute"),
+    (("所有表", "有哪些表", "show tables"),                                              "mcp_db_tables"),
+    (("表结构", "schema", "表字段"),                                                      "mcp_db_schema"),
+
+    # HTTP 请求
+    (("http get", "get 请求", "发起 get"),                                               "mcp_http_get"),
+    (("http post", "post 请求", "发起 post", "提交数据"),                                "mcp_http_post"),
+    (("http request", "自定义 http", "发请求"),                                          "mcp_http_request"),
+
+    # 代码执行
+    (("执行代码", "运行代码", "执行 python", "run code"),                                 "mcp_code_execute"),
+    (("计算表达式", "evaluate", "算一下"),                                                "mcp_code_evaluate"),
+
+    # ============= 预留扩展位 =============
+    (("搜索知识库", "search_knowledge"),                   "search_knowledge"),
+    (("联网搜索", "网上搜", "web_search"),                 "web_search"),
+]
+
+
+def _detect_force_tool(query: str) -> Optional[str]:
+    """
+    关键词检测：返回首个命中的工具名，未命中返回 None。
+
+    匹配规则：
+        - 忽略大小写（query 与关键词统一 lower 后比对）
+        - 子串包含即命中（避免 LLM 出现"翻译一下"这种小变化就漏判）
+    """
+    if not query:
+        return None
+    q = query.lower()
+    for keywords, tool_name in FORCE_TOOL_KEYWORDS:
+        for kw in keywords:
+            if kw.lower() in q:
+                logger.info(
+                    "router 关键词命中: keyword=%r → force_tool=%r (query=%r)",
+                    kw, tool_name, query[:60],
+                )
+                return tool_name
+    return None
+
+
+# ============================================================
 # 节点2：路由器（意图分类 + 结构化输出）
 # ============================================================
 
 def router_node(state: MasterState) -> dict:
     """
     路由器节点
-    
+
     分析用户意图，决定任务类型和处理路径。
     使用结构化输出确保返回格式正确。
-    
+
+    v3 增强：
+        - 在 LLM 分类前先做关键词检测（_detect_force_tool）
+        - 命中关键词时，强制设置 force_tool 字段
+        - agent_node 读取后追加"必须调用该工具"的 SystemMessage
+
     学习要点：
-    - 使用 with_structured_output 强制返回 JSON
-    - 根据任务类型决定后续路由
-    - 简单问题直接回答，复杂问题分发到子图
+        - 使用 with_structured_output 强制返回 JSON
+        - 根据任务类型决定后续路由
+        - 简单问题直接回答，复杂问题分发到子图
+        - 关键词短路：避免 LLM 把"翻译"误判为 simple
     """
     logger.info("执行路由器（意图分类）")
-    
+
     query = state.get("query", "")
-    
+
+    # ============================================================
+    # v3：关键词检测 → 强制工具（在前 LLM 分类之前，避免被覆盖）
+    # ============================================================
+    force_tool = _detect_force_tool(query)
+
     # 获取 LLM
     llm = get_llm()
-    
+
     # 使用结构化输出
     try:
         structured_llm = llm.with_structured_output(TaskAnalysis)
-        
+
         task_analysis: TaskAnalysis = structured_llm.invoke([
             SystemMessage(content="""你是一个任务分类器。分析用户输入，判断任务类型。
 
@@ -207,9 +319,9 @@ def router_node(state: MasterState) -> dict:
 - parallel: 需要并行处理多个独立任务"""),
             HumanMessage(content=query)
         ])
-        
+
         logger.info(f"任务分析结果: {task_analysis}")
-        
+
         # 决定路由
         if task_analysis.task_type == "simple":
             next_route = "agent"
@@ -221,26 +333,46 @@ def router_node(state: MasterState) -> dict:
             next_route = "parallel"
         else:
             next_route = "agent"
-        
+
+        # ============================================================
+        # v3：关键词命中时把 force_tool 写进 task_analysis & state
+        # ============================================================
+        # 同时把 requires_tools 置 True，提示 LLM 至少要考虑工具
+        analysis_dict = task_analysis.model_dump()
+        if force_tool:
+            analysis_dict["requires_tools"] = True
+            analysis_dict["force_tool"] = force_tool
+
         return {
-            "task_analysis": task_analysis.model_dump(),
+            "task_analysis": analysis_dict,
             "next_route": next_route,
-            "messages": [AIMessage(content=f"任务分类: {task_analysis.task_type}")]
+            "force_tool": force_tool,  # 顶层 state 字段，供 agent_node 读取
+            "messages": [AIMessage(
+                content=(
+                    f"任务分类: {task_analysis.task_type}"
+                    + (f" | 强制工具: {force_tool}" if force_tool else "")
+                )
+            )],
         }
-    
+
     except Exception as e:
         logger.error(f"路由失败: {e}")
-        # 默认走简单路径
+        # 默认走简单路径（但保留 force_tool，避免 LLM 异常时丢失强制指令）
         return {
             "task_analysis": {
                 "task_type": "simple",
                 "priority": "medium",
                 "complexity": 5,
                 "description": query,
-                "requires_tools": False
+                "requires_tools": bool(force_tool),  # v3：有强制工具时也要 True
+                "force_tool": force_tool,
             },
             "next_route": "agent",
-            "messages": [AIMessage(content="任务分类失败，使用默认路径")]
+            "force_tool": force_tool,
+            "messages": [AIMessage(
+                content="任务分类失败，使用默认路径"
+                + (f" | 强制工具: {force_tool}" if force_tool else "")
+            )],
         }
 
 
@@ -248,62 +380,80 @@ def router_node(state: MasterState) -> dict:
 # 节点3：研究子图
 # ============================================================
 
-def research_subgraph_node(state: MasterState) -> dict:
+async def research_subgraph_node(state: MasterState) -> dict:
     """
     研究子图节点
     
     执行搜索-分析-编译流程。
+    调用 A2A researcher agent 进行研究。
     
     学习要点：
     - 子图作为大图中的一个节点
     - 子图内部可以有多个节点
     - 子图结果返回给大图继续处理
+    - 使用 A2A 工具进行真实研究
     """
     logger.info("执行研究子图")
     
     query = state.get("query", "")
     
-    # 这里简化实现，实际应该调用 research_graph
-    # 模拟研究过程
-    llm = get_llm()
-    
-    # 1. 搜索（模拟）
-    search_results = [
-        f"搜索结果1: 关于 '{query}' 的信息...",
-        f"搜索结果2: 相关数据...",
-        f"搜索结果3: 最新进展..."
-    ]
-    
-    # 2. 分析
-    analysis_prompt = f"""基于以下搜索结果，分析并总结关键信息：
+    try:
+        # 调用 A2A researcher agent
+        logger.info(f"调用 a2a_researcher 研究: {query}")
+        result = await a2a_client.create_task(
+            agent_name="researcher",
+            input_data={"query": query}
+        )
+        
+        if result.get("status") == "completed":
+            research_content = result.get("result", {}).get("output", "研究完成，但未返回具体内容")
+            report = f"""
+研究报告：{query}
 
-搜索结果：
-{chr(10).join(search_results)}
+研究结果：
+{research_content}
+"""
+            logger.info("A2A researcher 研究完成")
+            
+            return {
+                "research_result": report,
+                "research_sources": ["a2a_researcher"],
+                "messages": [AIMessage(content="研究完成")]
+            }
+        else:
+            logger.warning(f"A2A researcher 返回状态: {result.get('status')}")
+            raise Exception(f"A2A 任务未完成: {result.get('status')}")
+            
+    except Exception as e:
+        logger.error(f"调用 a2a_researcher 失败: {e}，使用 LLM 降级处理")
+        
+        # 降级：使用 LLM 直接回答
+        llm = get_llm()
+        analysis_prompt = f"""请研究并分析以下问题：
 
 用户问题：{query}
 
-请提供简洁的分析总结："""
-    
-    analysis_response = llm.invoke([HumanMessage(content=analysis_prompt)])
-    
-    # 3. 编译报告
-    report = f"""
+请提供详细的研究结果，包括：
+1. 关键信息点
+2. 相关数据或事实
+3. 总结和建议"""
+        
+        analysis_response = llm.invoke([HumanMessage(content=analysis_prompt)])
+        
+        report = f"""
 研究报告：{query}
 
-关键发现：
-{chr(10).join([f"- {r}" for r in search_results])}
-
-分析总结：
+研究结果：
 {analysis_response.content}
+
+（注：A2A researcher 不可用，使用 LLM 直接回答）
 """
-    
-    logger.info("研究子图完成")
-    
-    return {
-        "research_result": report,
-        "research_sources": search_results,
-        "messages": [AIMessage(content="研究完成")]
-    }
+        
+        return {
+            "research_result": report,
+            "research_sources": ["llm_fallback"],
+            "messages": [AIMessage(content="研究完成（降级模式）")]
+        }
 
 
 # ============================================================
@@ -458,37 +608,86 @@ def dynamic_tools_node(state: MasterState) -> dict:
 def agent_node(state: MasterState) -> dict:
     """
     Agent 推理节点
-    
+
     调用 LLM 进行推理，可能产生工具调用。
-    
+
     学习要点：
     - 这是核心推理节点
     - 根据状态决定是否需要工具
     - 支持多轮对话
+    - 通过 SystemMessage 显式提示"一次性工具用完即止"，减少死循环
+
+    v3 增强：
+    - 读取 router 注入的 force_tool，追加"必须调用该工具"的 SystemMessage
+    - 优先级最高（最后追加），确保 LLM 在最终决策时能看到
     """
     logger.info("执行 Agent 推理")
-    
+
     messages = state.get("messages", [])
     query = state.get("query", "")
-    
+
     # 如果有研究结果，加入上下文
     research_result = state.get("research_result")
     if research_result:
         messages = messages + [SystemMessage(content=f"研究结果：{research_result}")]
-    
+
     # 如果有 Map-Reduce 结果
     final_summary = state.get("final_summary")
     if final_summary:
         messages = messages + [SystemMessage(content=f"文档摘要：{final_summary}")]
-    
-    # 获取 LLM
+
+    # ============================================================
+    # 反死循环引导（生产级关键）
+    # ============================================================
+    # 现象：LLM 拿到工具结果后仍反复调用同一工具（如 a2a_translator）
+    # 策略：在 tools 节点之后追加一条 SystemMessage，引导 LLM 基于结果收尾
+    # 注意：仅在已有 tool_call 计数 >0 时追加，避免首次推理时被误导
+    if state.get("tool_call_count", 0) > 0:
+        guidance = (
+            "系统提示：你已经调用过工具并收到结果。"
+            "如果结果已经包含用户所需信息，请直接基于结果用自然语言回答用户，"
+            "不要再次调用同一工具。仅在确实需要补充新信息时才发起新的工具调用，"
+            "且新调用的参数应与之前不同。"
+        )
+        messages = messages + [SystemMessage(content=guidance)]
+
+    # ============================================================
+    # v3：强制工具调用指令（关键词路由触发）
+    # ============================================================
+    # 触发条件：router_node 命中关键词后注入了 force_tool
+    # 作用：追加在 messages 末尾，优先级最高，强制 LLM 调用目标工具
+    # 配合：stuck_guard 在工具结果回来后会追加"已收尾"指令，避免死循环
+    force_tool = state.get("force_tool")
+    if force_tool:
+        must_call = (
+            f"系统强制指令（v3）：检测到用户任务「{query}」命中关键词路由，"
+            f"必须通过调用 `{force_tool}` 工具完成本次任务。\n"
+            f"要求：\n"
+            f"  1. 在本次响应中必须发起对 `{force_tool}` 的工具调用（不要跳过工具直接回答）；\n"
+            f"  2. 工具调用完成后，基于返回结果用自然语言向用户呈现最终答案；\n"
+            f"  3. 不要重复调用相同工具（同一 (tool_name, args) 组合最多调用 1 次）。"
+        )
+        messages = messages + [SystemMessage(content=must_call)]
+        logger.info(f"Agent 注入强制工具指令: force_tool={force_tool}")
+
+    # 获取 LLM，绑定所有可用工具（本地 + MCP 动态工具）
     llm = get_llm()
-    llm_with_tools = llm.bind_tools(TOOLS)
-    
+    llm_with_tools = llm.bind_tools(tool_manager.get_all_tools())
+
     # 调用 LLM
+    logger.info(f"Agent 输入消息数: {len(messages)}")
     response = llm_with_tools.invoke(messages)
     
     logger.info(f"Agent 推理完成，工具调用: {len(response.tool_calls)}")
+    
+    # 打印 Agent 推理内容
+    if response.content:
+        logger.info(f"Agent 推理内容: {response.content[:500]}")
+    
+    # 打印工具调用详情
+    if response.tool_calls:
+        for i, tc in enumerate(response.tool_calls):
+            logger.info(f"  工具调用[{i+1}]: name={tc['name']}, args={tc['args']}")
     
     return {
         "messages": [response],
@@ -499,21 +698,34 @@ def agent_node(state: MasterState) -> dict:
 # 节点8：工具执行
 # ============================================================
 
-def tool_node_master(state: MasterState) -> dict:
+async def tool_node_master(state: MasterState) -> dict:
     """
     工具执行节点（Master 版本）
-    
-    执行 Agent 请求的工具调用。
-    
+
+    .. deprecated::
+        自 v2 防死循环重构起，已被 `PrebuiltToolNode` 替代。
+        当前函数保留仅为向后兼容，新代码请使用 build_master_graph() 中
+        的 `prebuilt_tools` 节点。后续版本将删除。
+
+    执行 Agent 请求的工具调用，支持本地工具和 MCP 动态工具。
+
     学习要点：
-    - 支持内部工具和 MCP 工具
+    - 通过 tool_manager 统一查找工具（本地 + MCP）
+    - MCP 工具（带 coroutine）走异步执行
+    - 本地工具走同步执行
     - 错误重试机制
     - 结果存储到状态
+    - 增加调用计数器防止死循环
     """
+    from langchain_core.messages import ToolMessage
+    
     logger.info("执行工具调用")
     
     messages = state.get("messages", [])
     last_message = messages[-1]
+    
+    # 获取当前调用次数
+    tool_call_count = state.get("tool_call_count", 0)
     
     tool_results = {}
     
@@ -522,18 +734,31 @@ def tool_node_master(state: MasterState) -> dict:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             
-            # 查找工具
-            tool = None
-            for t in TOOLS:
-                if t.name == tool_name:
-                    tool = t
-                    break
+            logger.info(f"准备执行工具: {tool_name}, 参数: {tool_args}")
+            
+            # 通过 tool_manager 查找工具（本地 + MCP）
+            tool = tool_manager.find_tool(tool_name)
             
             if tool:
                 try:
-                    result = tool.invoke(tool_args)
+                    # 判断工具类型：MCP 工具走异步，本地工具走同步
+                    if hasattr(tool, 'coroutine') and tool.coroutine is not None:
+                        logger.info(f"执行异步工具: {tool_name}")
+                        result = await tool.ainvoke(tool_args)
+                        logger.info(f"MCP 工具 {tool_name} 执行成功")
+                    else:
+                        logger.info(f"执行同步工具: {tool_name}")
+                        result = tool.invoke(tool_args)
+                        logger.info(f"本地工具 {tool_name} 执行成功")
+                    
+                    # 打印工具返回结果
+                    result_str = str(result)
+                    if len(result_str) > 500:
+                        logger.info(f"工具 {tool_name} 返回结果(前500字符): {result_str[:500]}...")
+                    else:
+                        logger.info(f"工具 {tool_name} 返回结果: {result_str}")
+                    
                     tool_results[tool_name] = result
-                    logger.info(f"工具 {tool_name} 执行成功")
                 except Exception as e:
                     logger.error(f"工具 {tool_name} 执行失败: {e}")
                     tool_results[tool_name] = f"错误: {e}"
@@ -542,7 +767,6 @@ def tool_node_master(state: MasterState) -> dict:
                 tool_results[tool_name] = "工具未找到"
     
     # 构建工具消息
-    from langchain_core.messages import ToolMessage
     tool_messages = [
         ToolMessage(content=str(result), tool_call_id=tc["id"])
         for tc in last_message.tool_calls
@@ -550,9 +774,14 @@ def tool_node_master(state: MasterState) -> dict:
         if tc["name"] in tool_results
     ]
     
+    # 增加调用计数
+    new_count = tool_call_count + 1
+    logger.info(f"工具调用次数: {new_count}")
+    
     return {
         "tool_results": tool_results,
         "messages": tool_messages,
+        "tool_call_count": new_count,
     }
 
 
@@ -587,16 +816,19 @@ def human_review_node(state: MasterState) -> dict:
         
         logger.info(f"人工审核: {pending_action}, approved={approved}")
         
+        # 注意：不要往 messages 里追加 AIMessage！
+        # 原因：PrebuiltToolNode._find_last_ai() 会找到最后一条 AIMessage，
+        # 如果这里追加一条没有 tool_calls 的 AIMessage，
+        # 会导致 tools 节点找不到原始的 tool_calls，工具无法执行。
         return {
             "pending_action": pending_action,
             "approved": approved,
             "human_feedback": human_feedback,
-            "messages": [AIMessage(content=f"人工审核: {human_feedback}")]
         }
     
+    # 无需审核时，也不修改 messages
     return {
         "approved": True,
-        "messages": [AIMessage(content="无需审核")]
     }
 
 
@@ -666,152 +898,8 @@ def reflection_node(state: MasterState) -> dict:
 
 
 # ============================================================
-# 节点11：MCP 工具调用
 # ============================================================
-
-async def mcp_tools_node(state: MasterState) -> dict:
-    """
-    MCP 工具调用节点
-    
-    调用外部 MCP Server 提供的工具。
-    
-    学习要点：
-    - 通过 HTTP 连接独立的 mcp_server
-    - 支持文件操作、数据库查询、HTTP 请求等
-    - 结果存储到状态中
-    """
-    logger.info("执行 MCP 工具调用")
-    
-    query = state.get("query", "")
-    mcp_results = []
-    
-    # 根据任务类型选择合适的 MCP 工具
-    task_analysis = state.get("task_analysis", {})
-    task_type = task_analysis.get("task_type", "simple")
-    
-    try:
-        # 检查 MCP Server 是否可用
-        if not await mcp_client.health_check():
-            logger.warning("MCP Server 不可用")
-            return {
-                "mcp_tool_calls": [],
-                "mcp_results": [{"error": "MCP Server 不可用"}],
-                "messages": [AIMessage(content="MCP 服务不可用")]
-            }
-        
-        # 示例：根据任务类型调用不同的工具
-        if task_type == "document":
-            # 文件操作：保存文档
-            result = await mcp_client.call_tool("file_write", {
-                "path": "document.txt",
-                "content": query
-            })
-            mcp_results.append(result)
-        
-        elif task_type == "search":
-            # HTTP 请求：搜索信息
-            result = await mcp_client.call_tool("http_get", {
-                "url": f"https://api.example.com/search?q={query}"
-            })
-            mcp_results.append(result)
-        
-        logger.info(f"MCP 工具调用完成，结果数: {len(mcp_results)}")
-        
-        return {
-            "mcp_tool_calls": [{"tool": "mcp_tools", "task_type": task_type}],
-            "mcp_results": mcp_results,
-            "messages": [AIMessage(content="MCP 工具调用完成")]
-        }
-    
-    except Exception as e:
-        logger.error(f"MCP 工具调用失败: {e}")
-        return {
-            "mcp_tool_calls": [],
-            "mcp_results": [{"error": str(e)}],
-            "messages": [AIMessage(content=f"MCP 调用失败: {e}")]
-        }
-
-
-# ============================================================
-# 节点12：A2A 协作
-# ============================================================
-
-async def a2a_collaboration_node(state: MasterState) -> dict:
-    """
-    A2A 协作节点
-    
-    调用外部 A2A Server 的专业 Agent 进行协作。
-    
-    学习要点：
-    - 通过 HTTP 连接独立的 a2a_server
-    - 支持研究、编码、翻译、分析等专业 Agent
-    - 任务异步执行，获取结果
-    """
-    logger.info("执行 A2A 协作")
-    
-    query = state.get("query", "")
-    task_analysis = state.get("task_analysis", {})
-    task_type = task_analysis.get("task_type", "simple")
-    
-    try:
-        # 检查 A2A Server 是否可用
-        if not await a2a_client.health_check():
-            logger.warning("A2A Server 不可用")
-            return {
-                "a2a_task_id": None,
-                "a2a_result": None,
-                "messages": [AIMessage(content="A2A 服务不可用")]
-            }
-        
-        # 根据任务类型选择合适的 Agent
-        agent_map = {
-            "search": "researcher",
-            "document": "analyzer",
-            "parallel": "coder",
-            "simple": "translator"
-        }
-        
-        agent_name = agent_map.get(task_type, "researcher")
-        
-        # 创建任务
-        task_result = await a2a_client.create_task(
-            agent_name=agent_name,
-            input_data={
-                "query": query,
-                "context": state.get("query", "")
-            }
-        )
-        
-        task_id = task_result.get("task_id")
-        
-        if task_result.get("status") == "completed":
-            result = task_result.get("result", {})
-            logger.info(f"A2A 协作完成，Agent: {agent_name}")
-            
-            return {
-                "a2a_task_id": task_id,
-                "a2a_result": result,
-                "messages": [AIMessage(content=f"A2A 协作完成: {agent_name}")]
-            }
-        else:
-            logger.warning(f"A2A 任务未完成: {task_result.get('status')}")
-            return {
-                "a2a_task_id": task_id,
-                "a2a_result": None,
-                "messages": [AIMessage(content="A2A 任务处理中")]
-            }
-    
-    except Exception as e:
-        logger.error(f"A2A 协作失败: {e}")
-        return {
-            "a2a_task_id": None,
-            "a2a_result": None,
-            "messages": [AIMessage(content=f"A2A 协作失败: {e}")]
-        }
-
-
-# ============================================================
-# 节点13：输出安全过滤
+# 节点12：输出安全过滤
 # ============================================================
 
 def guard_output_node(state: MasterState) -> dict:
@@ -865,6 +953,8 @@ def summarizer_node(state: MasterState) -> dict:
     学习要点：
     - 整合多来源信息
     - 生成连贯的最终回答
+    - 含 final_response 兜底：极端情况下 LLM 因工具循环未给出文本时，
+      自动从最后一条 ToolMessage 提取答案，避免前端拿到 None
     """
     logger.info("执行汇总")
     
@@ -893,7 +983,22 @@ def summarizer_node(state: MasterState) -> dict:
     if results:
         final_response = "\n\n".join(results)
     else:
-        final_response = "处理完成，但未生成有效结果。"
+        # ============================================================
+        # 兜底分支（生产级关键）：results 为空时的安全降级
+        # ============================================================
+        # 触发场景：路由路径完全跳过了所有"产生 results"的节点
+        # 安全策略：直接读最后一条 ToolMessage 的 content 作为最终回答
+        from langchain_core.messages import ToolMessage
+        last_tool_message: Optional[ToolMessage] = None
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage):
+                last_tool_message = msg
+                break
+        
+        if last_tool_message is not None and last_tool_message.content:
+            final_response = f"（自动汇总工具结果）{last_tool_message.content}"
+        else:
+            final_response = "处理完成，但未生成有效结果。"
     
     logger.info("汇总完成")
     
@@ -1082,40 +1187,81 @@ def route_after_router(state: MasterState) -> str:
 
 
 def route_after_agent(state: MasterState) -> str:
-    """Agent 推理后的路由"""
+    """
+    Agent 推理后的路由（v2 —— 防死循环重构）
+
+    新流程：所有"有 tool_calls"的情况都先经过 stuck_guard 节点。
+    - 无 tool_calls：直接进入 reflection
+    - 有 tool_calls：进入 stuck_guard（防抖守卫）
+
+    实际 max_tool_calls 硬限转移到 route_after_human_review 中检查，
+    避免在 agent 之后立即打断 LLM。
+    """
     messages = state.get("messages", [])
+    if not messages:
+        return "reflection"
+
     last_message = messages[-1]
-    
-    # 检查是否有工具调用
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        return "human_review"  # 需要工具调用，先人工审核
-    else:
-        return "reflection"  # 没有工具调用，直接反思
+        return "stuck_guard"
+    return "reflection"
+
+
+def route_after_stuck_guard_wrapper(state: MasterState) -> str:
+    """
+    stuck_guard 节点之后的路由（薄包装，复用 middleware 中的纯函数）
+
+    决策：
+        - _force_skip_tools=True → 跳到 reflection（不再进入 tools）
+        - 否则 → 进入 human_review
+    """
+    return route_after_stuck_guard(state)
 
 
 def route_after_human_review(state: MasterState) -> str:
-    """人工审核后的路由"""
-    if state.get("approved", False):
-        return "tools"  # 批准，执行工具
-    else:
-        return "reflection"  # 拒绝，直接反思
+    """
+    人工审核后的路由（v2）
+
+    决策：
+        - 未批准 → reflection
+        - 已批准但达到 max_tool_calls → reflection（兜底，stuck_guard 已先拦截）
+        - 已批准且未达上限 → tools
+    """
+    # DEBUG: 打印路由决策的关键状态值
+    approved = state.get("approved", False)
+    tool_call_count = state.get("tool_call_count", 0)
+    max_tool_calls = state.get("max_tool_calls", 5)
+    force_skip = state.get("_force_skip_tools", False)
+    
+    logger.info(
+        f"[ROUTE-DEBUG] route_after_human_review: "
+        f"approved={approved}, tool_call_count={tool_call_count}, "
+        f"max_tool_calls={max_tool_calls}, _force_skip_tools={force_skip}"
+    )
+    
+    if not approved:
+        logger.info("[ROUTE-DEBUG] → reflection (未批准)")
+        return "reflection"
+
+    if tool_call_count >= max_tool_calls:
+        logger.warning(
+            f"工具调用次数已达上限 ({max_tool_calls})，强制结束"
+        )
+        logger.info("[ROUTE-DEBUG] → reflection (达到上限)")
+        return "reflection"
+
+    logger.info("[ROUTE-DEBUG] → tools (已批准，进入工具执行)")
+    return "tools"
 
 
 def route_after_tools(state: MasterState) -> str:
-    """工具执行后的路由 - 根据任务类型决定是否调用 MCP/A2A"""
-    task_type = state.get("task_analysis", {}).get("task_type", "simple")
+    """
+    工具执行后的路由
     
-    # 搜索类任务调用 MCP
-    if task_type == "search":
-        return "mcp_tools"
-    
-    # 文档类任务调用 A2A
-    elif task_type == "document":
-        return "a2a_collaboration"
-    
-    # 其他任务直接回到 Agent
-    else:
-        return "agent"
+    注：MCP 和 A2A 工具已动态注册为 LangChain Tool，Agent 可直接调用，
+    无需经过此路由节点。工具执行后直接回到 Agent 生成最终回答。
+    """
+    return "agent"
 
 
 def route_after_reflection(state: MasterState) -> str:
@@ -1134,46 +1280,85 @@ def route_after_reflection(state: MasterState) -> str:
 # 构建统一大图
 # ============================================================
 
+def _stuck_guard_node_wrapper(state: MasterState) -> dict:
+    """
+    stuck_guard_node 的薄包装，使其能直接接 LangGraph StateGraph。
+
+    复用 middleware.stuck_guard.stuck_guard_node 纯函数，保证逻辑可单测。
+    """
+    return stuck_guard_node(state, threshold=DEFAULT_STUCK_THRESHOLD)
+
+
+def _build_prebuilt_tool_node() -> PrebuiltToolNode:
+    """
+    构造"prebuilt 风格"工具执行节点。
+
+    行为：
+        - 接收 tool_manager 中所有工具（本地 + MCP + A2A）
+        - 自动区分同步/异步工具
+        - 工具异常时不抛错，封装为 ToolMessage.content 返回
+    """
+    return PrebuiltToolNode(
+        tools=tool_manager.get_all_tools(),
+        handle_tool_errors=True,  # 生产环境：异常不中断流程
+    )
+
+
 def build_master_graph():
     """
-    构建统一大图
-    
+    构建统一大图（v2 —— 防死循环重构）
+
     流程图：
-        START → guard_input → router → [subgraph/mapreduce/parallel/agent]
-              → agent → human_review → tools → agent (循环)
+        START → guard_input → router → [research_subgraph/mapreduce/parallel/agent]
+              → [research_subgraph/mapreduce/parallel] → agent
+              → agent → stuck_guard → human_review → tools → agent (循环)
+                                       └─(_force_skip/未批准/超限)→ reflection
               → reflection → guard_output → summarizer → END
-    
+
+    三层防死循环：
+        1. stuck_guard：连续 N 次相同 (tool, args) 立即拦截
+        2. max_tool_calls：累计硬上限（默认 5）
+        3. recursion_limit：chat.py 调用处兜底（默认 15）
+
     学习要点：
-    - 所有功能集成在一个图中
-    - 通过条件路由实现分支
-    - 支持循环（agent ↔ tools）
-    - 带 checkpointer 支持时间旅行
+        - 所有功能集成在一个图中
+        - 通过条件路由实现分支
+        - 防循环责任分层：业务层（stuck_guard）+ 资源层（max_tool_calls）+ 框架层（recursion_limit）
+        - 带 checkpointer 支持时间旅行
     """
-    logger.info("构建统一大图")
-    
+    logger.info("构建统一大图（v2 防死循环重构）")
+
     workflow = StateGraph(MasterState)
-    
+
+    # ============================================================
     # 添加所有节点
+    # ============================================================
     workflow.add_node("guard_input", guard_input_node)
     workflow.add_node("router", router_node)
     workflow.add_node("research_subgraph", research_subgraph_node)
     workflow.add_node("mapreduce", mapreduce_node)
     workflow.add_node("parallel", parallel_node)
     workflow.add_node("dynamic_tools", dynamic_tools_node)
-    workflow.add_node("mcp_tools", mcp_tools_node)
-    workflow.add_node("a2a_collaboration", a2a_collaboration_node)
     workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", tool_node_master)
+
+    # v2 新增：stuck_guard 守卫节点
+    workflow.add_node("stuck_guard", _stuck_guard_node_wrapper)
+
+    # v2 重构：使用 PrebuiltToolNode 替代手写 tool_node_master
+    #         行为等价但更稳定（支持 handle_tool_errors、并发调用等）
+    prebuilt_tools = _build_prebuilt_tool_node()
+    workflow.add_node("tools", prebuilt_tools)
+
     workflow.add_node("human_review", human_review_node)
     workflow.add_node("reflection", reflection_node)
     workflow.add_node("guard_output", guard_output_node)
     workflow.add_node("summarizer", summarizer_node)
-    
-    # 设置入口点
+
+    # ============================================================
+    # 边：入口与分叉
+    # ============================================================
     workflow.set_entry_point("guard_input")
-    
-    # 添加边
-    # guard_input → router 或 summarizer（如果不安全）
+
     workflow.add_conditional_edges(
         "guard_input",
         route_after_guard_input,
@@ -1182,8 +1367,7 @@ def build_master_graph():
             "summarizer": "summarizer"
         }
     )
-    
-    # router → 根据任务类型分发
+
     workflow.add_conditional_edges(
         "router",
         route_after_router,
@@ -1194,23 +1378,37 @@ def build_master_graph():
             "agent": "agent"
         }
     )
-    
+
     # 所有处理路径最终汇聚到 agent
     workflow.add_edge("research_subgraph", "agent")
     workflow.add_edge("mapreduce", "agent")
     workflow.add_edge("parallel", "agent")
-    
-    # agent → human_review 或 reflection
+
+    # ============================================================
+    # 边：核心循环（v2 —— 含 stuck_guard）
+    # ============================================================
+
+    # agent → stuck_guard（始终先经过防抖）或 reflection（无 tool_calls）
     workflow.add_conditional_edges(
         "agent",
         route_after_agent,
+        {
+            "stuck_guard": "stuck_guard",
+            "reflection": "reflection"
+        }
+    )
+
+    # stuck_guard → human_review（正常）或 reflection（强制跳过）
+    workflow.add_conditional_edges(
+        "stuck_guard",
+        route_after_stuck_guard_wrapper,
         {
             "human_review": "human_review",
             "reflection": "reflection"
         }
     )
-    
-    # human_review → tools 或 reflection
+
+    # human_review → tools（批准 + 未超限）或 reflection（拒绝/超限）
     workflow.add_conditional_edges(
         "human_review",
         route_after_human_review,
@@ -1219,25 +1417,13 @@ def build_master_graph():
             "reflection": "reflection"
         }
     )
-    
-    # tools → mcp_tools/a2a_collaboration/agent（根据任务类型）
-    workflow.add_conditional_edges(
-        "tools",
-        route_after_tools,
-        {
-            "mcp_tools": "mcp_tools",
-            "a2a_collaboration": "a2a_collaboration",
-            "agent": "agent"
-        }
-    )
-    
-    # mcp_tools → agent
-    workflow.add_edge("mcp_tools", "agent")
-    
-    # a2a_collaboration → agent
-    workflow.add_edge("a2a_collaboration", "agent")
-    
-    # reflection → guard_output 或 agent（重试）
+
+    # tools → agent（工具执行后回到 Agent 生成最终回答）
+    workflow.add_edge("tools", "agent")
+
+    # ============================================================
+    # 边：尾部（反思 → 输出过滤 → 汇总）
+    # ============================================================
     workflow.add_conditional_edges(
         "reflection",
         route_after_reflection,
@@ -1246,17 +1432,16 @@ def build_master_graph():
             "agent": "agent"
         }
     )
-    
-    # guard_output → summarizer
+
     workflow.add_edge("guard_output", "summarizer")
-    
-    # summarizer → END
     workflow.add_edge("summarizer", END)
-    
-    # 编译图（带 checkpointer 支持时间旅行）
+
+    # ============================================================
+    # 编译（带 checkpointer 支持时间旅行）
+    # ============================================================
     graph = workflow.compile(checkpointer=memory_manager.checkpointer)
-    
-    logger.info("统一大图构建完成")
+
+    logger.info("统一大图构建完成（v2）")
     return graph
 
 
@@ -1293,12 +1478,19 @@ initial_state = {
     "tool_results": {},
     "mcp_tool_calls": [],
     "mcp_results": [],
+    "a2a_task_id": None,
+    "a2a_result": None,
     "pending_action": None,
     "human_feedback": None,
     "approved": False,
     "reflection": None,
     "retry_count": 0,
     "max_retries": 3,
+    "tool_call_count": 0,
+    "max_tool_calls": 5,
+    "stuck_signature": None,
+    "stuck_count": 0,
+    "_force_skip_tools": False,
     "final_response": None,
 }
 

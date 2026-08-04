@@ -51,16 +51,22 @@ class ToolRegistry:
         Returns:
             工具执行结果
         """
+        logger.info(f"[MCP] 调用工具: {name}, 参数: {arguments}")
+        
         tool = self.get_tool(name)
         
         if not tool:
+            logger.error(f"[MCP] 工具不存在: {name}")
             return {"error": f"工具不存在: {name}"}
         
         handler = tool["handler"]
         
         try:
-            return await handler(**arguments)
+            result = await handler(**arguments)
+            logger.info(f"[MCP] 工具 {name} 执行成功, 返回: {result}")
+            return result
         except Exception as e:
+            logger.error(f"[MCP] 工具 {name} 执行失败: {str(e)}")
             return {"error": f"工具执行失败: {str(e)}"}
 
 

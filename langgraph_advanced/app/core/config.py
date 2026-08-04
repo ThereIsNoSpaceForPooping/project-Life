@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     
     DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
     DASHSCOPE_BASE_URL: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    DASHSCOPE_MODEL: str = "qwen-plus"
+    DASHSCOPE_MODEL: str = "qwen3.7-plus"
     
     DEFAULT_PROVIDER: str = os.getenv("DEFAULT_PROVIDER", "dashscope")
     TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.7"))
@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     USE_REAL_API: bool = os.getenv("USE_REAL_API", "true").lower() == "true"
     WEATHER_API_KEY: str = os.getenv("WEATHER_API_KEY", "")
     SEARCH_MAX_RESULTS: int = int(os.getenv("SEARCH_MAX_RESULTS", "5"))
+    
+    # MCP / A2A 服务地址
+    MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://localhost:8001")
+    A2A_SERVER_URL: str = os.getenv("A2A_SERVER_URL", "http://localhost:8002")
     
     class Config:
         env_file = ".env"

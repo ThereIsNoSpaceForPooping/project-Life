@@ -1,0 +1,9 @@
+﻿python : E:\001个人\python\python.exe: can't open file 'E:\\008其他\\桌面\\WEB\\proje
+ct-Life\\debug_toolmgr.py': [Errno 2] No such file or directory
+所在位置 行:1 字符: 328
++ ... " ; Start-Sleep -Seconds 12 ; python -u debug_toolmgr.py 2>&1 | Out-F ...
++                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (E:\001个人\python...le or directory 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

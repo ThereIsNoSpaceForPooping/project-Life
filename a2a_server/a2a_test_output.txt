@@ -1,0 +1,53 @@
+============================================================
+A2A Server 直接测试
+============================================================
+
+[1] 健康检查 GET /health
+  状态码: 200
+  响应: {'status': 'ok', 'service': 'a2a_server'}
+
+[2] 列出 Agent GET /a2a/agents
+  状态码: 200
+  Agent 数量: 4
+   - researcher   | 研究助手 - 信息搜索和整理 | capabilities=['search', 'analyze', 'summarize']
+   - coder        | 编码助手 - 代码生成和审查 | capabilities=['generate', 'review', 'explain']
+   - translator   | 翻译助手 - 多语言翻译 | capabilities=['translate']
+   - analyzer     | 分析助手 - 数据分析和洞察 | capabilities=['trend', 'pattern', 'summary']
+
+[3] 翻译任务 POST /a2a/tasks
+  请求体: {
+  "agent_name": "translator",
+  "input_data": {
+    "text": "Hello World, this is a direct A2A test from Python.",
+    "source_lang": "auto",
+    "target_lang": "Chinese"
+  }
+}
+  状态码: 200
+  任务 ID: 16abd46d-352e-4a03-bc9b-d263c0a5bee8
+  状态: completed
+
+[4] 查询任务结果 GET /a2a/tasks/{task_id}
+  状态码: 200
+  状态: completed
+  翻译结果:
+    你好，世界，这是一次来自Python的直接A2A测试。
+
+***
+
+**翻译说明和注意事项：**
+1. **Hello World**：这是编程领域最经典的入门输出语句，直接译为“你好，世界”以契合技术语境。
+2. **A2A**：通常指 Agent-to-Agent（智能体间）或 Application-to-Application（应用间），在技术测试语境中直接保留缩写“A2A”，使表达更简洁专业。
+3. **Python**：作为编程语言名称，直接使用英文原文即可，无需翻译。整体句式保持了原文简洁、直接的测试信息风格。
+  翻译说明:
+    从 auto 翻译到 Chinese
+
+[5] 列出所有任务 GET /a2a/tasks
+  状态码: 200
+  总任务数: 2
+   - 16abd46d-352e-4a03-bc9b-d263c0a5bee8 | translator | completed  | 2026-08-05T00:11:21.236336
+   - c532d863-dee0-4c9a-b574-d6a73c1fb5cd | translator | completed  | 2026-08-05T00:10:09.883486
+
+============================================================
+测试完成 ✅
+============================================================

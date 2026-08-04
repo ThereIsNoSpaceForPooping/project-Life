@@ -15,11 +15,21 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(default="default", description="对话 ID")
 
 
+class StepInfo(BaseModel):
+    """步骤信息"""
+    type: str = Field(..., description="步骤类型: agent_reasoning/tool_call/tool_result/final_answer")
+    content: str = Field(default="", description="步骤内容")
+    tool_name: Optional[str] = Field(None, description="工具名称（仅tool_call/tool_result类型）")
+    tool_args: Optional[dict] = Field(None, description="工具参数（仅tool_call类型）")
+    tool_result: Optional[str] = Field(None, description="工具结果（仅tool_result类型）")
+
+
 class ChatResponse(BaseModel):
     """对话响应"""
     response: str = Field(..., description="AI 响应")
     conversation_id: str = Field(..., description="对话 ID")
     tool_calls: List[dict] = Field(default_factory=list, description="工具调用记录")
+    steps: List[StepInfo] = Field(default_factory=list, description="推理步骤详情")
 
 
 class StreamChunk(BaseModel):
