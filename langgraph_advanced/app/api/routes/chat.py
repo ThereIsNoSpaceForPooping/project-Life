@@ -12,14 +12,14 @@
 """
 
 import json
-import uuid
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, AIMessage
 
-from app.agent.graph import agent_graph
-from app.agent.multi_graph import multi_agent_graph
-from app.agent.master_graph import master_graph
+# 统一从 app.agent 聚合层导入（保持向后兼容）
+# 说明：内部已按"图维度"拆分为 single / multi / master / subagent 子包，
+#       顶层 __init__.py 将常用符号聚合导出，对调用方路径无感知。
+from app.agent import agent_graph, master_graph, multi_agent_graph, tool_manager
 from app.schemas.chat import ChatRequest, ChatResponse, StepInfo
 from app.core.logging import get_logger
 
@@ -185,14 +185,11 @@ async def generate_stream_response(graph, initial_state: dict, config: dict, mod
 
     事件清单：
     - RunStarted          流开始
-    - TextMessageStart    LLM 文本段开始（带 message id）
     - TextMessageContent  LLM 文本增量（content 字段）
-    - TextMessageEnd      LLM 文本段结束
     - ToolCallStart       工具调用开始（name + args）
     - ToolCallEnd         工具调用结束（name + result）
     - StepStarted         主图节点开始（name）
     - StepFinished        主图节点结束（name）
-    - StateDelta          状态变化（可选，当前未触发）
     - ReasoningSteps      推理步骤聚合（流末尾）
     - RunFinished         流正常结束
     - RunError            流异常结束（message）
@@ -215,16 +212,14 @@ async def generate_stream_response(graph, initial_state: dict, config: dict, mod
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     # ----- 跨事件维持的状态 -----
-    in_text: bool = False                  # 是否处于 TextMessage 流中
-    text_msg_id: str = ""                  # 当前 TextMessage 的 id
     current_step: str = ""                 # 当前正在执行的图节点名
     reasoning_steps: list = []             # 推理步骤聚合（流末尾一次性发出）
 
     # 主图的节点白名单（用于过滤 astream_events 内部子 chain）
     # 单 Agent / 多 Agent 模式没有完整子图，放行所有 chain 事件
     master_node_whitelist: set[str] = {
-        "guard_input", "router", "research_subgraph", "mapreduce", "parallel",
-        "dynamic_tools", "agent", "stuck_guard", "tools", "human_review",
+        "guard_input", "router", "research_subgraph", "mapreduce", "subagent",
+        "agent", "stuck_guard", "tools", "human_review",
         "reflection", "guard_output", "summarizer",
     }
 
@@ -283,36 +278,12 @@ async def generate_stream_response(graph, initial_state: dict, config: dict, mod
                 chunk = data.get("chunk")
                 if chunk is None:
                     continue
-                # 兼容 chunk.content 是 str 或 list[dict]
-                raw_content = getattr(chunk, "content", "") or ""
-                if isinstance(raw_content, list):
-                    # 某些多模态 LLM 把 content 编码为 list
-                    text_pieces = []
-                    for piece in raw_content:
-                        if isinstance(piece, dict) and piece.get("type") == "text":
-                            text_pieces.append(piece.get("text", ""))
-                        elif isinstance(piece, str):
-                            text_pieces.append(piece)
-                    content = "".join(text_pieces)
-                else:
-                    content = str(raw_content)
-
+                content = str(getattr(chunk, "content", "") or "")
                 if content:
-                    # 进入 TextMessage 段
-                    if not in_text:
-                        in_text = True
-                        text_msg_id = f"msg-{uuid.uuid4().hex[:8]}"
-                        yield sse("TextMessageStart", {"id": text_msg_id, "role": "assistant"})
-                    # 输出增量
-                    yield sse("TextMessageContent", {"id": text_msg_id, "content": content})
+                    yield sse("TextMessageContent", {"content": content})
 
             # ---- 2.4 工具调用开始 ----
             elif kind == "on_tool_start":
-                # 先关闭进行中的 TextMessage 段（保持协议状态机干净）
-                if in_text:
-                    yield sse("TextMessageEnd", {"id": text_msg_id})
-                    in_text = False
-
                 tool_name: str = name
                 tool_input = data.get("input", {}) or {}
                 # 统一 args 为字符串（前端 onToolCallArgs 期望 string 增量）
@@ -351,28 +322,19 @@ async def generate_stream_response(graph, initial_state: dict, config: dict, mod
             # ---- 2.6 其他事件忽略（on_chain_start 内部子链、on_llm_end 等） ----
 
         # ==========================================================
-        # 3) 收尾：关闭可能仍打开的 TextMessage 段
-        # ==========================================================
-        if in_text:
-            yield sse("TextMessageEnd", {"id": text_msg_id})
-            in_text = False
-
-        # ==========================================================
-        # 4) 推理步骤聚合（流末尾一次性下发）
+        # 3) 推理步骤聚合（流末尾一次性下发）
         # ==========================================================
         if reasoning_steps:
             yield sse("ReasoningSteps", {"steps": reasoning_steps})
 
         # ==========================================================
-        # 5) 流正常结束
+        # 4) 流正常结束
         # ==========================================================
         yield sse("RunFinished", {"status": "completed"})
 
     except Exception as e:
-        # 异常路径：关闭可能打开的段 + 发送错误事件
+        # 异常路径：发送错误事件
         logger.error(f"流式响应错误: {e}", exc_info=True)
-        if in_text:
-            yield sse("TextMessageEnd", {"id": text_msg_id})
         yield sse("RunError", {"message": str(e)})
 
 
@@ -386,7 +348,7 @@ async def debug_tools():
     """
     调试接口：返回当前进程 tool_manager 中所有工具的清单
     """
-    from app.agent.nodes import tool_manager
+    # tool_manager 已从 app.agent 聚合层顶层导入，复用即可
     tools = tool_manager.get_all_tools()
     return {
         "count": len(tools),
@@ -424,41 +386,36 @@ async def chat(
         if mode == "master":
             graph = master_graph
             initial_state = {
+                # 基础对话
                 "messages": [HumanMessage(content=request.message)],
                 "query": request.message,
                 "conversation_id": request.conversation_id,
+                # 安全护栏
                 "input_safe": True,
                 "output_safe": True,
                 "guard_warnings": [],
+                # 路由决策
                 "task_analysis": None,
                 "next_route": None,
+                # 子图结果（research_subgraph / subagent 在用）
                 "research_result": None,
                 "research_sources": [],
-                "document": None,
-                "chunks": [],
-                "chunk_summaries": [],
                 "final_summary": None,
-                "parallel_tasks": [],
-                "worker_results": [],
-                "aggregated_result": None,
-                "selected_tools": [],
-                "tool_results": {},
-                "mcp_tool_calls": [],
-                "mcp_results": [],
-                "a2a_task_id": None,
-                "a2a_result": None,
+                "subagent_result": None,
+                # 人机协作 + 反思
                 "pending_action": None,
                 "human_feedback": None,
                 "approved": False,
                 "reflection": None,
                 "retry_count": 0,
                 "max_retries": 3,
+                # 防死循环
                 "tool_call_count": 0,
                 "max_tool_calls": 5,
-                # v2 防死循环新增字段
                 "stuck_signature": None,
                 "stuck_count": 0,
                 "_force_skip_tools": False,
+                # 收尾
                 "final_response": None,
             }
         
@@ -521,7 +478,7 @@ async def chat(
             # 根据模式提取响应和步骤
             if mode == "master":
                 response_text = result.get("final_response") or "处理完成"
-                tool_calls = list(result.get("tool_results", {}).keys())
+                tool_calls = []
                 steps = extract_master_steps(result)
             
             elif mode == "multi":

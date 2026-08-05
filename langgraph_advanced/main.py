@@ -27,9 +27,10 @@ async def startup_init():
 
     在应用启动时加载 MCP 和 A2A 工具并打印可用工具列表。
     """
-    from app.agent.nodes import tool_manager
-    from app.agent.mcp.tools_loader import load_mcp_tools, print_available_tools
+    # 从 app.agent 聚合层顶层导入（向后兼容）
+    from app.agent import tool_manager
     from app.agent.a2a.tools_loader import load_a2a_tools
+    from app.agent.mcp.tools_loader import load_mcp_tools, print_available_tools
 
     logger.info("=" * 60)
     logger.info("开始加载外部工具...")

@@ -1,15 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Agent 节点定义
+单 Agent 节点定义
 
-节点（Node）是 LangGraph 图中的处理单元。
-每个节点是一个函数，接收当前状态，返回状态更新。
-
-学习要点：
-1. 节点函数接收 state 参数，返回 dict（状态更新）
-2. 节点可以调用 LLM、执行工具、进行逻辑判断
-3. 节点之间通过状态传递数据
-4. 使用 get_llm() 获取 LLM 实例
+这些节点用于单 Agent ReAct 模式（graph.py）。
+包含 Agent 推理、工具执行、人机协作、路由函数。
 """
 
 import asyncio
@@ -20,137 +14,14 @@ from typing import List, Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from app.agent.state import AgentState
-from app.agent.tools import TOOLS as LOCAL_TOOLS
+from app.agent.single.state import AgentState
+from app.agent.shared.tools import TOOLS as LOCAL_TOOLS
+from app.agent.shared.llm import get_llm
+from app.agent.shared.tool_manager import tool_manager
 from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-# ============================================================
-# 工具管理器：统一管理本地工具 + MCP 动态工具
-# ============================================================
-class ToolManager:
-    """
-    工具管理器
-
-    职责：
-    1. 管理本地工具（TOOLS）和从 MCP Server 动态加载的工具
-    2. 提供统一的 get_all_tools() 接口供 Agent 绑定
-    3. 提供 find_tool() 接口供 tool_node 查找工具
-    """
-
-    def __init__(self):
-        # 本地工具（静态，启动时即固定）
-        self._local_tools = list(LOCAL_TOOLS)
-        # MCP 动态工具（启动后由 load_mcp_tools() 填充）
-        self._mcp_tools: list = []
-        # A2A 动态工具（启动后由 load_a2a_tools() 填充）
-        self._a2a_tools: list = []
-        # 合并后的工具列表（懒加载缓存）
-        self._all_tools: Optional[list] = None
-
-    def set_mcp_tools(self, mcp_tools: list) -> None:
-        """
-        设置 MCP 动态工具列表（由启动流程调用）
-
-        Args:
-            mcp_tools: 从 MCP Server 加载的 StructuredTool 列表
-        """
-        self._mcp_tools = mcp_tools
-        self._all_tools = None  # 清除缓存，下次 get_all_tools() 时重建
-
-    def set_a2a_tools(self, a2a_tools: list) -> None:
-        """
-        设置 A2A 动态工具列表（由启动流程调用）
-
-        Args:
-            a2a_tools: 从 A2A Server 加载的 StructuredTool 列表
-        """
-        self._a2a_tools = a2a_tools
-        self._all_tools = None  # 清除缓存，下次 get_all_tools() 时重建
-
-    def get_all_tools(self) -> list:
-        """
-        获取所有可用工具（本地 + MCP + A2A）
-
-        Returns:
-            合并后的工具列表
-        """
-        if self._all_tools is None:
-            self._all_tools = self._local_tools + self._mcp_tools + self._a2a_tools
-        return self._all_tools
-
-    def find_tool(self, tool_name: str):
-        """
-        根据名称查找工具
-
-        Args:
-            tool_name: 工具名称
-
-        Returns:
-            工具实例，未找到返回 None
-        """
-        for t in self.get_all_tools():
-            if t.name == tool_name:
-                return t
-        return None
-
-
-# 全局工具管理器实例
-tool_manager = ToolManager()
-
-
-# 向后兼容：其他模块可能直接 import TOOLS
-TOOLS = LOCAL_TOOLS
-
-
-# ============================================================
-# LLM 实例管理
-# ============================================================
-def get_llm(provider: str = None, model: str = None, temperature: float = None) -> ChatOpenAI:
-    """
-    获取 LLM 实例
-    
-    根据配置创建对应的 LLM 实例。
-    支持 MiniMax 和通义千问（DashScope）。
-    
-    Args:
-        provider: LLM 提供商（minimax / dashscope）
-        model: 模型名称（不指定则使用默认模型）
-        temperature: 温度参数（0.0-2.0，越高越随机）
-    
-    Returns:
-        ChatOpenAI: LLM 实例
-    
-    学习要点：
-    - ChatOpenAI 是 LangChain 的统一接口
-    - 通过 base_url 可以对接不同的 LLM 提供商
-    - streaming=True 启用流式输出
-    """
-    provider = provider or settings.DEFAULT_PROVIDER
-    temperature = temperature if temperature is not None else settings.TEMPERATURE
-    
-    # 根据 provider 选择对应配置
-    if provider == "minimax":
-        return ChatOpenAI(
-            model=model or settings.MINIMAX_MODEL,
-            api_key=settings.MINIMAX_API_KEY,
-            base_url=settings.MINIMAX_BASE_URL,
-            temperature=temperature,
-            streaming=True,
-        )
-    elif provider == "dashscope":
-        return ChatOpenAI(
-            model=model or settings.DASHSCOPE_MODEL,
-            api_key=settings.DASHSCOPE_API_KEY,
-            base_url=settings.DASHSCOPE_BASE_URL,
-            temperature=temperature,
-            streaming=True,
-        )
-    else:
-        raise ValueError(f"不支持的 provider: {provider}")
 
 
 # ============================================================
@@ -159,38 +30,38 @@ def get_llm(provider: str = None, model: str = None, temperature: float = None) 
 def agent_node(state: AgentState) -> dict:
     """
     Agent 节点 - 调用 LLM 进行推理
-    
+
     这是 Agent 的核心节点，负责：
     1. 从 state 获取消息列表
     2. 创建 LLM 并绑定工具
     3. 调用 LLM 生成响应
     4. 如果 LLM 返回 tool_calls，后续会路由到工具节点
     5. 如果没有 tool_calls，后续会路由到 END
-    
+
     Args:
         state: 当前状态（包含 messages、tool_calls 等）
-    
+
     Returns:
         dict: 状态更新（包含新的 messages、tool_calls）
-    
+
     学习要点：
     - llm.bind_tools(TOOLS) 让 LLM 知道有哪些工具可用
     - LLM 返回的 AIMessage 可能包含 tool_calls
     - tool_calls 包含工具名称和参数
     """
     logger.info("执行 Agent 节点")
-    
+
     # 获取消息列表
     messages = state.get("messages", [])
-    
+
     # 获取 LLM 并绑定所有工具（本地 + MCP + A2A）
     llm = get_llm()
     llm_with_tools = llm.bind_tools(tool_manager.get_all_tools())
-    
+
     # 调用 LLM
     logger.info(f"Agent 输入消息数: {len(messages)}")
     response = llm_with_tools.invoke(messages)
-    
+
     # 记录工具调用
     tool_calls = []
     if hasattr(response, "tool_calls") and response.tool_calls:
@@ -199,11 +70,11 @@ def agent_node(state: AgentState) -> dict:
             for tc in response.tool_calls
         ]
         logger.info(f"Agent 推理完成，工具调用数: {len(tool_calls)}")
-        
+
         # 打印 Agent 推理内容
         if response.content:
             logger.info(f"Agent 推理内容: {response.content[:500]}")
-        
+
         # 打印工具调用详情
         for i, tc in enumerate(tool_calls):
             logger.info(f"  工具调用[{i+1}]: name={tc['name']}, args={tc['args']}")
@@ -211,7 +82,7 @@ def agent_node(state: AgentState) -> dict:
         logger.info(f"Agent 推理完成，无工具调用")
         if response.content:
             logger.info(f"Agent 最终回答: {response.content[:500]}")
-    
+
     return {
         "messages": [response],
         "tool_calls": tool_calls,
@@ -232,45 +103,45 @@ RETRY_BACKOFF = 2.0       # 退避倍数（指数退避）
 def _execute_tool_with_retry(tool, tool_args: dict, tool_name: str) -> str:
     """
     带重试机制的工具执行
-    
+
     采用指数退避策略：
         第1次失败 → 等待 1s → 重试
         第2次失败 → 等待 2s → 重试
         第3次失败 → 返回错误
-    
+
     Args:
         tool: 工具实例
         tool_args: 工具参数
         tool_name: 工具名称
-    
+
     Returns:
         str: 工具执行结果
-    
+
     学习要点：
     - 指数退避：每次重试等待时间翻倍
     - 防止网络抖动导致的临时失败
     - 企业级代码必须有重试机制
     """
     last_error = None
-    
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             result = tool.invoke(tool_args)
             logger.info(f"工具 {tool_name} 第{attempt}次执行成功")
             return str(result)
-        
+
         except Exception as e:
             last_error = e
             logger.warning(
                 f"工具 {tool_name} 第{attempt}次执行失败: {e}"
             )
-            
+
             # 如果还有重试机会，等待后重试
             if attempt < MAX_RETRIES:
                 delay = RETRY_DELAY * (RETRY_BACKOFF ** (attempt - 1))
                 logger.info(f"等待 {delay}s 后重试...")
                 time.sleep(delay)
-    
+
     # 所有重试都失败
     logger.error(f"工具 {tool_name} 在 {MAX_RETRIES} 次尝试后仍然失败")
     return f"工具执行失败（已重试{MAX_RETRIES}次）: {str(last_error)}"
@@ -363,37 +234,37 @@ async def tool_node(state: AgentState) -> dict:
 def human_review_node(state: AgentState) -> dict:
     """
     人机协作节点 - 等待人工审核
-    
+
     当 Agent 需要执行敏感操作时，暂停执行等待人工确认。
     配合 LangGraph 的 interrupt_before 使用。
-    
+
     流程:
         1. 检查 state 中是否有待审核的工具调用
         2. 如果有，标记为需要审核
         3. 人工审核后，通过 Command(resume=...) 恢复执行
-    
+
     Args:
         state: 当前状态
-    
+
     Returns:
         dict: 更新后的状态
-    
+
     学习要点：
     - 人机协作是企业级应用的重要特性
     - 可以防止 Agent 执行危险操作
     - 配合 interrupt_before 实现暂停/恢复
     """
     logger.info("执行人机协作节点 - 等待人工审核")
-    
+
     messages = state.get("messages", [])
     last_message = messages[-1] if messages else None
-    
+
     # 检查是否需要人工审核
     if last_message and hasattr(last_message, "tool_calls") and last_message.tool_calls:
         # 标记需要审核的工具调用
         pending_tools = [tc["name"] for tc in last_message.tool_calls]
         logger.info(f"等待人工审核工具调用: {pending_tools}")
-        
+
         return {
             "current_step": "human_review",
             "messages": [
@@ -402,7 +273,7 @@ def human_review_node(state: AgentState) -> dict:
                 )
             ],
         }
-    
+
     return {"current_step": "human_review_passed"}
 
 
@@ -412,17 +283,17 @@ def human_review_node(state: AgentState) -> dict:
 def should_continue(state: AgentState) -> str:
     """
     判断是否继续执行工具
-    
+
     路由规则:
         - 有 tool_calls → 路由到 "tools" 节点
         - 无 tool_calls → 路由到 "end" 结束
-    
+
     Args:
         state: 当前状态
-    
+
     Returns:
         str: 下一个节点名称 ("tools" 或 "end")
-    
+
     学习要点：
     - 条件边（Conditional Edge）根据函数返回值路由
     - 返回值必须是图中已定义的节点名
@@ -430,11 +301,11 @@ def should_continue(state: AgentState) -> str:
     """
     messages = state.get("messages", [])
     last_message = messages[-1] if messages else None
-    
+
     # 如果最后一条消息有工具调用，继续执行工具
     if last_message and hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
-    
+
     # 否则结束
     return "end"
 
@@ -442,28 +313,28 @@ def should_continue(state: AgentState) -> str:
 def should_review(state: AgentState) -> str:
     """
     判断是否需要人工审核
-    
+
     路由规则:
         - 有 tool_calls 且启用审核 → 路由到 "human_review"
         - 否则 → 路由到 "tools" 直接执行
-    
+
     Args:
         state: 当前状态
-    
+
     Returns:
         str: 下一个节点名称 ("human_review" 或 "tools" 或 "end")
-    
+
     学习要点：
     - 根据配置动态切换路由
     - 支持基础模式和人机协作模式
     """
     messages = state.get("messages", [])
     last_message = messages[-1] if messages else None
-    
+
     if last_message and hasattr(last_message, "tool_calls") and last_message.tool_calls:
         # 检查是否启用人工审核
         if settings.ENABLE_HUMAN_REVIEW:
             return "human_review"
         return "tools"
-    
+
     return "end"

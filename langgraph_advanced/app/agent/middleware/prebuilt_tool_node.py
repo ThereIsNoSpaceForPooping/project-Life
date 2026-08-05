@@ -23,7 +23,7 @@ Prebuilt-style ToolNode（自研兼容版）
 - 不支持 `InjectedState`/`InjectedStore`（本项目目前未用到）
 - 不支持 `messages_key` 参数（写死 "messages"）
 - 不执行 Send-style 路由分发
-- 状态更新除了 messages 外，额外回写 `tool_results` 与 `tool_call_count`
+- 状态更新除了 messages 外，额外回写 `tool_call_count`
 
 后续迁移
 --------
@@ -127,16 +127,9 @@ class PrebuiltToolNode:
         # 累加 tool_call_count（每次进入 tools 节点 +1，与项目原有语义一致）
         prev_count = int(state.get("tool_call_count", 0) or 0)
 
-        # 同时汇总 tool_results（dict 形态，供下游节点消费）
-        tool_results: Dict[str, Any] = dict(state.get("tool_results", {}) or {})
-        for tm in tool_messages:
-            # 多个同名工具调用时，后者覆盖前者；调用方若有需求可改为 list
-            tool_results[tm.name] = tm.content
-
         return {
             self._messages_key: tool_messages,
             "tool_call_count": prev_count + 1,
-            "tool_results": tool_results,
         }
 
     # ------------------------------------------------------------
@@ -159,7 +152,7 @@ class PrebuiltToolNode:
         if tool is None:
             # 尝试从 tool_manager 动态获取（解决 MCP/A2A 工具加载时序问题）
             try:
-                from app.agent.nodes import tool_manager
+                from app.agent.shared.tool_manager import tool_manager
                 all_tools = {t.name: t for t in tool_manager.get_all_tools()}
                 tool = all_tools.get(tool_name)
                 if tool:

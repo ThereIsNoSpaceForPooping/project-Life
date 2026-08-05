@@ -2,15 +2,18 @@
 """
 流式服务
 
-提供流式响应功能，支持：
-1. 基础对话流式输出
-2. 高级功能流式输出
-3. 工具调用流式通知
+提供流式响应功能：
+1. 基础对话流式输出（StreamService.stream_chat）
+2. 工具调用流式通知
 
 学习要点：
 1. 使用 FastAPI 的 StreamingResponse
 2. 使用 SSE (Server-Sent Events) 协议
 3. 实时推送执行进度
+
+历史说明：
+    原 stream_advanced()（subgraph/parallel/mapreduce demo 图流式）
+    随 app/agent/advanced 目录整体下线，无外部调用方，一并删除。
 """
 
 import json
@@ -18,9 +21,7 @@ from typing import AsyncGenerator
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.graph import agent_graph
-from app.agent.advanced.subgraph import research_graph
-from app.agent.advanced.parallel import parallel_graph
+from app.agent import agent_graph
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -107,97 +108,6 @@ class StreamService:
         
         except Exception as e:
             logger.error(f"流式对话失败: {e}")
-            yield StreamService._format_sse({
-                "type": "error",
-                "content": f"错误: {str(e)}"
-            })
-    
-    @staticmethod
-    async def stream_advanced(feature: str, message: str, conversation_id: str) -> AsyncGenerator[str, None]:
-        """
-        流式高级功能
-        
-        使用高级功能图进行流式处理。
-        
-        Args:
-            feature: 功能名称（subgraph / parallel / mapreduce）
-            message: 用户消息
-            conversation_id: 对话 ID
-        
-        Yields:
-            str: SSE 格式的响应块
-        """
-        try:
-            logger.info(f"开始流式高级功能: {feature}, {message[:50]}...")
-            
-            # 根据功能选择图
-            if feature == "subgraph":
-                graph = research_graph
-                initial_state = {
-                    "messages": [HumanMessage(content=message)],
-                    "query": message,
-                    "search_results": [],
-                    "analysis": None,
-                    "report": None,
-                }
-            elif feature == "parallel":
-                graph = parallel_graph
-                initial_state = {
-                    "messages": [HumanMessage(content=message)],
-                    "tasks": [],
-                    "worker_results": [],
-                    "final_result": None,
-                }
-            else:
-                yield StreamService._format_sse({
-                    "type": "error",
-                    "content": f"不支持的功能: {feature}"
-                })
-                return
-            
-            config = {
-                "configurable": {
-                    "thread_id": conversation_id
-                }
-            }
-            
-            # 流式执行
-            async for event in graph.astream_events(initial_state, config, version="v1"):
-                event_kind = event["event"]
-                
-                # 节点开始
-                if event_kind == "on_chain_start":
-                    node_name = event["name"]
-                    yield StreamService._format_sse({
-                        "type": "node_start",
-                        "content": f"开始执行: {node_name}"
-                    })
-                
-                # 节点结束
-                elif event_kind == "on_chain_end":
-                    node_name = event["name"]
-                    yield StreamService._format_sse({
-                        "type": "node_end",
-                        "content": f"完成执行: {node_name}"
-                    })
-                
-                # LLM 流式输出
-                elif event_kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    if hasattr(chunk, "content") and chunk.content:
-                        yield StreamService._format_sse({
-                            "type": "content",
-                            "content": chunk.content
-                        })
-            
-            # 发送结束标记
-            yield StreamService._format_sse({
-                "type": "done",
-                "content": "完成"
-            })
-        
-        except Exception as e:
-            logger.error(f"流式高级功能失败: {e}")
             yield StreamService._format_sse({
                 "type": "error",
                 "content": f"错误: {str(e)}"

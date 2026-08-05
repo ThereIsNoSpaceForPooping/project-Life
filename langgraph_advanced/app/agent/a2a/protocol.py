@@ -39,8 +39,8 @@ from app.agent.a2a.task import Task, TaskStatus, task_manager
 from app.agent.a2a.message import (
     Message, MessageType, MessageFactory, message_history
 )
-from app.agent.nodes import get_llm
-from app.agent.tools import web_search, search_knowledge, calculate
+from app.agent.shared.llm import get_llm
+from app.agent.shared.tools import web_search, search_knowledge, calculate
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
