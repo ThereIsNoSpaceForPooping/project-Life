@@ -1,9 +1,22 @@
 # MCP Server 依赖
-fastapi>=0.100.0
-uvicorn>=0.23.0
-pydantic>=2.0.0
-python-dotenv>=1.0.0
+#
+# 核心协议依赖：
+#   mcp[cli] - Anthropic 官方 MCP Python SDK（包含 FastMCP 与 uvicorn）
+#
+# 数据/网络依赖：
+#   aiosqlite - 异步 SQLite 驱动
+#   httpx     - 异步 HTTP 客户端
+#   python-dotenv - .env 文件加载
+#
+# 协议规范：https://modelcontextprotocol.io
+# SDK 仓库：https://github.com/modelcontextprotocol/python-sdk
+
+# 官方 MCP SDK（含 FastMCP / stdio_server / Streamable HTTP）
+mcp[cli]>=1.0.0
 
 # 工具依赖
 aiosqlite>=0.19.0
-httpx>=0.24.0
+httpx>=0.27.0
+
+# 环境变量
+python-dotenv>=1.0.0

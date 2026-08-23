@@ -46,9 +46,9 @@ from langchain_core.messages import (
 )
 from pydantic import BaseModel, Field
 
-from app.agent.a2a.simple_client import a2a_client
+from app.agent.a2a.tools_loader import a2a_loader
 from app.agent.master.state import MasterState, ReflectionResult, TaskAnalysis
-from app.agent.mcp.simple_client import mcp_client
+from app.agent.mcp.tools_loader import mcp_loader
 from app.agent.middleware.prebuilt_tool_node import PrebuiltToolNode
 from app.agent.middleware.stuck_guard import (
     DEFAULT_STUCK_THRESHOLD,
@@ -318,13 +318,26 @@ async def research_subgraph_node(state: MasterState) -> dict:
     try:
         # 调用 A2A researcher agent
         logger.info(f"调用 a2a_researcher 研究: {query}")
-        result = await a2a_client.create_task(
+        if a2a_loader is None or a2a_loader.client is None:
+            raise RuntimeError("A2A Loader 未初始化")
+        task: Dict[str, Any] = await a2a_loader.client.send(
+            text=query,
             agent_name="researcher",
-            input_data={"query": query},
         )
+        state_str: str = task.get("status", {}).get("state", "")
 
-        if result.get("status") == "completed":
-            research_content = result.get("result", {}).get("output", "研究完成，但未返回具体内容")
+        if state_str == "completed":
+            # 提取 artifact 中的输出文本
+            artifacts: List[Dict[str, Any]] = task.get("artifacts", [])
+            if artifacts:
+                parts: List[Dict[str, Any]] = artifacts[0].get("parts", [])
+                research_content: str = "\n".join(
+                    p.get("text", "")
+                    for p in parts
+                    if p.get("type") == "text"
+                )
+            else:
+                research_content = "研究完成，但未返回具体内容"
             report = f"""
 研究报告：{query}
 
@@ -339,8 +352,8 @@ async def research_subgraph_node(state: MasterState) -> dict:
                 "messages": [AIMessage(content="研究完成")],
             }
         else:
-            logger.warning(f"A2A researcher 返回状态: {result.get('status')}")
-            raise Exception(f"A2A 任务未完成: {result.get('status')}")
+            logger.warning(f"A2A researcher 返回状态: {state_str}")
+            raise Exception(f"A2A 任务未完成: {state_str}")
 
     except Exception as e:
         # 降级：使用 LLM 直接回答
@@ -969,26 +982,40 @@ async def auto_explore_node(state: MasterState) -> dict:
     # ------------------------------------------------------------------
     # 1. 动态获取 MCP 工具列表
     # ------------------------------------------------------------------
-    mcp_tools = []
+    mcp_tools: List[Dict[str, Any]] = []
     try:
-        if await mcp_client.health_check():
-            mcp_tools = await mcp_client.list_tools()
+        if mcp_loader is not None and mcp_loader.client is not None:
+            mcp_tools = await mcp_loader.client.list_tools()
             logger.info(f"获取到 {len(mcp_tools)} 个 MCP 工具")
         else:
-            logger.warning("MCP Server 不可用")
+            logger.warning("MCP Loader 未初始化")
     except Exception as e:
         logger.error(f"获取 MCP 工具失败: {e}")
 
     # ------------------------------------------------------------------
     # 2. 动态获取 A2A Agent 列表
     # ------------------------------------------------------------------
-    a2a_agents = []
+    a2a_agents: List[Dict[str, Any]] = []
     try:
-        if await a2a_client.health_check():
-            a2a_agents = await a2a_client.list_agents()
+        if a2a_loader is not None and a2a_loader.client is not None:
+            if a2a_loader.client.agent_card is None:
+                await a2a_loader.client.discover()
+            card: Optional[Dict[str, Any]] = a2a_loader.client.agent_card
+            if card:
+                # 从 AgentCard 的 skills 构造 agents 列表
+                seen: set = set()
+                for skill in card.get("skills", []):
+                    skill_id: str = skill.get("id", "")
+                    agent_name: str = skill_id.split("-")[0] if "-" in skill_id else skill_id
+                    if agent_name and agent_name not in seen:
+                        a2a_agents.append({
+                            "name": agent_name,
+                            "description": skill.get("description", ""),
+                        })
+                        seen.add(agent_name)
             logger.info(f"获取到 {len(a2a_agents)} 个 A2A Agent")
         else:
-            logger.warning("A2A Server 不可用")
+            logger.warning("A2A Loader 未初始化")
     except Exception as e:
         logger.error(f"获取 A2A Agent 列表失败: {e}")
 
@@ -1059,11 +1086,19 @@ async def auto_explore_node(state: MasterState) -> dict:
             elif "code" in tool_name:
                 args = {"code": "print('hello')"}
 
-            result = await mcp_client.call_tool(tool_name, args)
+            if mcp_loader is None or mcp_loader.client is None:
+                raise RuntimeError("MCP Loader 未初始化")
+            mcp_result: Dict[str, Any] = await mcp_loader.client.call_tool(tool_name, args)
+            # 解析 content 列表
+            content_text: str = "\n".join(
+                item.get("text", "")
+                for item in mcp_result.get("content", [])
+                if item.get("type") == "text"
+            )
             results.append({
                 "type": "mcp",
                 "tool": tool_name,
-                "result": result,
+                "result": content_text or mcp_result,
             })
             logger.info(f"MCP 工具 {tool_name} 执行完成")
         except Exception as e:
@@ -1077,15 +1112,26 @@ async def auto_explore_node(state: MasterState) -> dict:
     # 执行 A2A Agent
     for agent_name in selection.selected_a2a_agents:
         try:
-            input_data = {
-                "query": query,
-                "context": "自动探索任务",
-            }
-            result = await a2a_client.create_task(agent_name, input_data)
+            if a2a_loader is None or a2a_loader.client is None:
+                raise RuntimeError("A2A Loader 未初始化")
+            a2a_task: Dict[str, Any] = await a2a_loader.client.send(
+                text=query,
+                agent_name=agent_name,
+            )
+            # 提取 artifact 中的输出
+            artifacts_list: List[Dict[str, Any]] = a2a_task.get("artifacts", [])
+            output_text: str = ""
+            if artifacts_list:
+                parts_list: List[Dict[str, Any]] = artifacts_list[0].get("parts", [])
+                output_text = "\n".join(
+                    p.get("text", "")
+                    for p in parts_list
+                    if p.get("type") == "text"
+                )
             results.append({
                 "type": "a2a",
                 "agent": agent_name,
-                "result": result,
+                "result": output_text or a2a_task,
             })
             logger.info(f"A2A Agent {agent_name} 执行完成")
         except Exception as e:

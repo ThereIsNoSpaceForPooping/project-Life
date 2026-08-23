@@ -1,365 +1,223 @@
 # -*- coding: utf-8 -*-
 """
-MCP Client 实现
+MCP 真实客户端（基于 Anthropic 官方 SDK）
 
-MCP Client 是连接到 MCP Server 的客户端。
-Agent 通过 Client 调用 Server 提供的工具。
+使用 mcp.client 提供的 ClientSession，通过 Streamable HTTP
+或 stdio 连接到外部 MCP Server。
 
-学习要点：
-1. Client 通过传输层连接到 Server
-2. 使用 JSON-RPC 2.0 协议通信
-3. Client 负责序列化工具调用和反序列化结果
-4. 支持异步调用
+使用官方 SDK 意味着：
+    - 自动处理 JSON-RPC 2.0 协议
+    - 自动处理 initialize / tools/list / tools/call 流程
+    - 自动维护会话状态
 
-架构图：
-    Agent → MCP Client → Transport → MCP Server → Tool Handler
-                ↑                                    ↓
-                └────── Transport ←── JSON-RPC ──────┘
+典型用法：
+    from app.agent.mcp.client import MCPClient
+
+    client = MCPClient("http://localhost:8001/mcp")
+    await client.connect()
+    tools = await client.list_tools()
+    result = await client.call_tool("file_read", {"path": "test.txt"})
+    await client.close()
 """
 
 import asyncio
+import logging
+from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
-from app.agent.mcp.transport import BaseTransport, create_transport
-from app.agent.mcp.tools import MCPToolDefinition
+# 官方 MCP Python SDK
+try:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.stdio import stdio_client, StdioServerParameters
+    from mcp.types import Tool as MCPSchema
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "缺少 mcp SDK，请执行: pip install mcp[cli]"
+    ) from exc
+
 from app.core.logging import get_logger
 
-logger = get_logger(__name__)
+logger: logging.Logger = get_logger(__name__)
 
 
-# ============================================================
-# MCP Client 类
-# ============================================================
 class MCPClient:
     """
-    MCP Client - 连接到 MCP Server 的客户端
-    
-    职责：
-    1. 通过传输层连接到 Server
-    2. 获取可用工具列表
-    3. 调用工具并获取结果
-    4. 管理连接生命周期
-    
-    使用示例：
-        client = MCPClient()
-        await client.connect("stdio", process=process)
-        tools = await client.list_tools()
-        result = await client.call_tool("read_file", {"path": "/tmp/test.txt"})
-        await client.disconnect()
+    MCP 真实客户端
+
+    基于 Anthropic 官方 Python SDK 实现。
+    支持：
+        - Streamable HTTP 传输（推荐用于远程 Server）
+        - stdio 传输（推荐用于本地进程）
     """
-    
-    def __init__(self):
-        """初始化 MCP Client"""
-        self._transport: Optional[BaseTransport] = None
-        self._request_id = 0
-        self._connected = False
-        self._server_info: Optional[Dict] = None
-        
-        logger.info("MCP Client 初始化")
-    
-    async def connect(self, transport_type: str, **kwargs) -> None:
+
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        command: Optional[str] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> None:
         """
-        连接到 MCP Server
-        
+        初始化客户端（二选一）
+
         Args:
-            transport_type: 传输类型（stdio / sse / http）
-            **kwargs: 传输层参数
-        
-        使用示例：
-            # stdio 连接
-            await client.connect("stdio", process=subprocess)
-            
-            # HTTP 连接
-            await client.connect("http", base_url="http://localhost:8080")
+            url: Streamable HTTP 端点（如 "http://localhost:8001/mcp"）
+            command: stdio 模式的命令（如 "python"）
+            args: stdio 模式的参数列表
+            env: stdio 模式的环境变量
+        """
+        self.url: Optional[str] = url
+        self.command: Optional[str] = command
+        self.args: List[str] = args or []
+        self.env: Optional[Dict[str, str]] = env
+
+        self._exit_stack: AsyncExitStack = AsyncExitStack()
+        self._session: Optional[ClientSession] = None
+        self._connected: bool = False
+
+    async def connect(self) -> None:
+        """
+        建立连接并完成 MCP 协议初始化握手
+
+        MCP 协议要求客户端在发送任何业务请求前先完成 initialize 流程。
+        官方 ClientSession 会在 __aenter__ 阶段自动完成。
         """
         if self._connected:
-            logger.warning("Client 已连接")
             return
-        
-        # 创建传输层
-        self._transport = create_transport(transport_type, **kwargs)
-        
-        # 发送 initialize 请求
-        init_result = await self._send_request("initialize", {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "langgraph-mcp-client",
-                "version": "1.0.0",
-            }
-        })
-        
-        self._server_info = init_result
-        self._connected = True
-        
-        logger.info(f"连接到 MCP Server: {init_result.get('serverInfo', {})}")
-    
-    async def disconnect(self) -> None:
-        """断开连接"""
-        if not self._connected:
-            return
-        
-        if self._transport:
-            await self._transport.close()
-        
-        self._connected = False
-        self._transport = None
-        self._server_info = None
-        
-        logger.info("从 MCP Server 断开连接")
-    
-    async def _send_request(self, method: str, params: Dict = None) -> Dict:
-        """
-        发送 JSON-RPC 请求
-        
-        Args:
-            method: 方法名
-            params: 参数
-        
-        Returns:
-            Dict: 响应结果
-        """
-        if not self._connected or not self._transport:
-            raise RuntimeError("Client 未连接")
-        
-        # 生成请求 ID
-        self._request_id += 1
-        request_id = self._request_id
-        
-        # 构造 JSON-RPC 请求
-        request = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params or {},
-            "id": request_id,
-        }
-        
-        logger.debug(f"发送请求: {method}, id={request_id}")
-        
-        # 发送请求
-        await self._transport.send(request)
-        
-        # 接收响应
-        response = await self._transport.receive()
-        
-        if response is None:
-            raise RuntimeError("未收到响应")
-        
-        # 检查错误
-        if "error" in response:
-            error = response["error"]
-            raise RuntimeError(f"JSON-RPC 错误: {error.get('message', '未知错误')}")
-        
-        # 返回结果
-        return response.get("result", {})
-    
-    async def list_tools(self) -> List[MCPToolDefinition]:
-        """
-        获取可用工具列表
-        
-        Returns:
-            List[MCPToolDefinition]: 工具定义列表
-        
-        使用示例：
-            tools = await client.list_tools()
-            for tool in tools:
-                print(f"{tool.name}: {tool.description}")
-        """
-        result = await self._send_request("tools/list")
-        
-        tools_data = result.get("tools", [])
-        tools = []
-        
-        for tool_data in tools_data:
-            tool = MCPToolDefinition(
-                name=tool_data["name"],
-                description=tool_data["description"],
-                parameters=tool_data.get("inputSchema", {}),
-                required=tool_data.get("inputSchema", {}).get("required", [])
-            )
-            tools.append(tool)
-        
-        logger.info(f"获取到 {len(tools)} 个工具")
-        return tools
-    
-    async def call_tool(self, tool_name: str, arguments: Dict = None) -> Any:
-        """
-        调用工具
-        
-        Args:
-            tool_name: 工具名称
-            arguments: 工具参数
-        
-        Returns:
-            Any: 工具执行结果
-        
-        使用示例：
-            result = await client.call_tool("read_file", {"path": "/tmp/test.txt"})
-            print(result)
-        """
-        logger.info(f"调用工具: {tool_name}, 参数: {arguments}")
-        
-        result = await self._send_request("tools/call", {
-            "name": tool_name,
-            "arguments": arguments or {},
-        })
-        
-        # 提取结果内容
-        content = result.get("content", [])
-        is_error = result.get("isError", False)
-        
-        if is_error:
-            error_text = content[0].get("text", "未知错误") if content else "未知错误"
-            raise RuntimeError(f"工具调用失败: {error_text}")
-        
-        # 返回文本内容
-        if content and content[0].get("type") == "text":
-            return content[0].get("text", "")
-        
-        return result
-    
-    async def ping(self) -> bool:
-        """
-        测试连接
-        
-        Returns:
-            bool: 连接是否正常
-        """
+
         try:
-            await self._send_request("ping")
-            return True
-        except Exception as e:
-            logger.error(f"Ping 失败: {e}")
-            return False
-    
-    @property
-    def is_connected(self) -> bool:
-        """是否已连接"""
-        return self._connected
-    
-    @property
-    def server_info(self) -> Optional[Dict]:
-        """Server 信息"""
-        return self._server_info
+            if self.url:
+                # Streamable HTTP 传输
+                read_stream, write_stream, _ = (
+                    await self._exit_stack.enter_async_context(
+                        streamablehttp_client(self.url)
+                    )
+                )
+            elif self.command:
+                # stdio 传输
+                params: StdioServerParameters = StdioServerParameters(
+                    command=self.command,
+                    args=self.args,
+                    env=self.env,
+                )
+                read_stream, write_stream = (
+                    await self._exit_stack.enter_async_context(
+                        stdio_client(params)
+                    )
+                )
+            else:
+                raise ValueError("必须指定 url 或 command 之一")
 
-
-# ============================================================
-# MCP 工具包装器
-# ============================================================
-class MCPToolWrapper:
-    """
-    MCP 工具包装器 - 将 MCP 工具转换为 LangChain 工具
-    
-    这样可以让 Agent 像使用普通 LangChain 工具一样使用 MCP 工具。
-    
-    使用示例：
-        wrapper = MCPToolWrapper(client)
-        langchain_tools = await wrapper.get_langchain_tools()
-        llm_with_tools = llm.bind_tools(langchain_tools)
-    """
-    
-    def __init__(self, client: MCPClient):
-        """
-        初始化包装器
-        
-        Args:
-            client: MCP Client 实例
-        """
-        self.client = client
-    
-    async def get_langchain_tools(self) -> list:
-        """
-        获取 LangChain 格式的工具列表
-        
-        Returns:
-            list: LangChain 工具列表
-        """
-        from langchain_core.tools import StructuredTool
-        from pydantic import create_model
-        
-        mcp_tools = await self.client.list_tools()
-        langchain_tools = []
-        
-        for mcp_tool in mcp_tools:
-            # 动态创建 Pydantic 模型
-            properties = mcp_tool.parameters.get("properties", {})
-            required = mcp_tool.parameters.get("required", [])
-            
-            # 构造字段定义
-            fields = {}
-            for field_name, field_schema in properties.items():
-                field_type = self._json_type_to_python(field_schema.get("type", "string"))
-                field_desc = field_schema.get("description", "")
-                
-                if field_name in required:
-                    fields[field_name] = (field_type, ...)
-                else:
-                    fields[field_name] = (Optional[field_type], None)
-            
-            # 创建动态模型
-            model_name = f"{mcp_tool.name}_Input"
-            input_model = create_model(model_name, **fields)
-            
-            # 创建异步调用函数
-            async def tool_func(**kwargs):
-                return await self.client.call_tool(mcp_tool.name, kwargs)
-            
-            # 创建 LangChain 工具
-            tool = StructuredTool(
-                name=mcp_tool.name,
-                description=mcp_tool.description,
-                coroutine=tool_func,
-                args_schema=input_model,
+            # 创建 ClientSession
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
             )
-            
-            langchain_tools.append(tool)
-        
-        logger.info(f"转换 {len(langchain_tools)} 个 MCP 工具为 LangChain 格式")
-        return langchain_tools
-    
-    def _json_type_to_python(self, json_type: str) -> type:
+
+            # 触发 initialize 握手
+            init_result = await self._session.initialize()
+
+            logger.info(
+                "[MCPClient] 已连接: server='%s', version='%s'",
+                init_result.serverInfo.name,
+                init_result.protocolVersion,
+            )
+            self._connected = True
+
+        except Exception as exc:
+            logger.error("[MCPClient] 连接失败: %s", exc)
+            await self._exit_stack.aclose()
+            self._exit_stack = AsyncExitStack()
+            raise
+
+    async def list_tools(self) -> List[Dict[str, Any]]:
         """
-        将 JSON Schema 类型转换为 Python 类型
-        
+        获取 MCP Server 提供的所有工具
+
+        返回每个工具的：
+            - name        工具名
+            - description 描述
+            - inputSchema 参数 JSON Schema
+            - annotations 工具标注（readOnly / destructive 等）
+        """
+        if not self._connected or not self._session:
+            raise RuntimeError("Client 未连接，请先调用 await client.connect()")
+
+        response = await self._session.list_tools()
+        tools: List[Dict[str, Any]] = []
+        for tool in response.tools:
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": tool.inputSchema,
+                    "annotations": tool.annotations.model_dump()
+                    if tool.annotations
+                    else {},
+                }
+            )
+        logger.info("[MCPClient] 工具列表: %d 个", len(tools))
+        return tools
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        调用 MCP 工具
+
         Args:
-            json_type: JSON 类型（string / number / integer / boolean / array / object）
-        
+            name: 工具名称
+            arguments: 工具参数
+
         Returns:
-            type: Python 类型
+            {
+                "content": [
+                    {"type": "text", "text": "..."},
+                    ...
+                ],
+                "isError": False/True
+            }
         """
-        type_map = {
-            "string": str,
-            "number": float,
-            "integer": int,
-            "boolean": bool,
-            "array": list,
-            "object": dict,
+        if not self._connected or not self._session:
+            raise RuntimeError("Client 未连接，请先调用 await client.connect()")
+
+        logger.info(
+            "[MCPClient] 调用工具: %s, 参数: %s",
+            name, list(arguments.keys()),
+        )
+
+        result = await self._session.call_tool(name, arguments)
+
+        # 解析 content
+        content: List[Dict[str, Any]] = []
+        for item in result.content:
+            if hasattr(item, "text"):
+                content.append({"type": "text", "text": item.text})
+            elif hasattr(item, "data"):
+                content.append({"type": "data", "data": item.data})
+            elif hasattr(item, "blob"):
+                content.append(
+                    {
+                        "type": "file",
+                        "blob": item.blob,
+                        "mimeType": getattr(item, "mimeType", None),
+                    }
+                )
+            else:
+                content.append({"type": "unknown", "raw": str(item)})
+
+        return {
+            "content": content,
+            "isError": getattr(result, "isError", False),
         }
-        return type_map.get(json_type, str)
 
-
-# ============================================================
-# 便捷函数
-# ============================================================
-async def create_mcp_client(
-    transport_type: str = "http",
-    **kwargs
-) -> MCPClient:
-    """
-    创建并连接 MCP Client
-    
-    Args:
-        transport_type: 传输类型
-        **kwargs: 传输层参数
-    
-    Returns:
-        MCPClient: 已连接的 Client 实例
-    
-    使用示例：
-        client = await create_mcp_client("http", base_url="http://localhost:8080")
-        tools = await client.list_tools()
-        await client.disconnect()
-    """
-    client = MCPClient()
-    await client.connect(transport_type, **kwargs)
-    return client
+    async def close(self) -> None:
+        """关闭连接"""
+        if self._connected:
+            await self._exit_stack.aclose()
+            self._exit_stack = AsyncExitStack()
+            self._session = None
+            self._connected = False
+            logger.info("[MCPClient] 已关闭连接")

@@ -1,67 +1,72 @@
 # -*- coding: utf-8 -*-
 """
-A2A Server - 研究 Agent
-
-专注于信息搜索和整理。
+Researcher Agent
 """
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-from config import Config
+import asyncio
+from typing import Any, Dict, List
+
+from agents.base import BaseAgent
 
 
-class ResearcherAgent:
-    """研究 Agent - 信息搜索和整理"""
-    
-    def __init__(self):
-        self.llm = ChatOpenAI(
-            model=Config.LLM_MODEL,
-            api_key=Config.LLM_API_KEY,
-            base_url=Config.LLM_BASE_URL,
-            temperature=0.7
+class ResearcherAgent(BaseAgent):
+    """
+    研究助手 Agent
+
+    职责：信息搜索、知识整理、文献综述。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="researcher",
+            description="研究助手：负责信息搜索、知识整理、文献综述",
+            skills=[
+                {
+                    "id": "research-search",
+                    "name": "信息搜索",
+                    "description": "针对用户问题搜索相关资料",
+                    "tags": ["search", "research"],
+                    "examples": ["搜索 AI 最新进展", "查找 Python 教程"],
+                },
+                {
+                    "id": "research-summarize",
+                    "name": "知识整理",
+                    "description": "将搜集的信息整理为结构化知识",
+                    "tags": ["summarize", "knowledge"],
+                    "examples": ["总结机器学习基础概念"],
+                },
+            ],
         )
-        
-        self.system_prompt = """你是一个专业的研究助手，擅长信息搜索和整理。
 
-你的职责：
-1. 分析用户的研究需求
-2. 提供结构化的研究结果
-3. 给出可靠的信息来源建议
-4. 总结关键发现和洞察
+    async def run(
+        self,
+        user_text: str,
+        history: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        await asyncio.sleep(0.2)
 
-请以专业、客观、有条理的方式回答问题。"""
-    
-    async def process(self, input_data: dict) -> dict:
-        """
-        处理研究任务
-        
-        Args:
-            input_data: {"query": "研究问题", "context": "背景信息"}
-        
-        Returns:
-            {"result": "研究结果", "sources": ["来源建议"]}
-        """
-        query = input_data.get("query", "")
-        context = input_data.get("context", "")
-        
-        # 构建消息
-        messages = [
-            SystemMessage(content=self.system_prompt),
-            HumanMessage(content=f"研究问题：{query}\n\n背景信息：{context}")
+        intermediate: List[Dict[str, Any]] = [
+            {
+                "type": "message",
+                "role": "agent",
+                "text": f"[思考] 分析研究问题: {user_text[:50]}...",
+            }
         ]
-        
-        # 调用 LLM
-        response = await self.llm.ainvoke(messages)
-        
+
+        output: str = (
+            f"[Researcher] 已针对您的问题进行信息检索和整理。\n\n"
+            f"问题: {user_text}\n\n"
+            f"（研究结果占位 - 生产环境对接 RAG / Web 搜索）"
+        )
+
         return {
-            "result": response.content,
-            "sources": [
-                "建议搜索学术数据库获取更多信息",
-                "参考相关行业报告",
-                "查阅官方文档和权威资料"
-            ]
+            "output": output,
+            "artifacts": [
+                {
+                    "name": "research-report",
+                    "description": "研究结果报告",
+                    "parts": [{"type": "text", "text": output}],
+                }
+            ],
+            "intermediate": intermediate,
         }
-
-
-# 全局实例
-researcher_agent = ResearcherAgent()

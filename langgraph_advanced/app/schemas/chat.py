@@ -53,6 +53,47 @@ class TaskResponse(BaseModel):
     result: Optional[dict] = Field(default=None, description="任务结果")
 
 
+# ============================================================
+# A2A 专用模型（基于 Google A2A 协议 v0.2）
+# ============================================================
+class A2ATaskRequest(BaseModel):
+    """
+    A2A 任务创建请求
+
+    对应 A2A 协议 JSON-RPC `message/send` / `message/stream` 的参数。
+    """
+    agent_name: str = Field(..., description="目标 Agent 名称（如 researcher/coder/translator/analyzer）")
+    text: str = Field(..., description="发送给 Agent 的任务文本")
+    session_id: Optional[str] = Field(default=None, description="会话 ID（多轮对话时复用）")
+
+
+class A2ATaskResponse(BaseModel):
+    """A2A 任务同步执行响应（对应 message/send）"""
+    task_id: str = Field(..., description="任务 ID")
+    state: str = Field(..., description="任务状态: submitted/working/input-required/completed/failed/canceled")
+    messages: List[dict] = Field(default_factory=list, description="消息历史")
+    artifacts: List[dict] = Field(default_factory=list, description="产物列表")
+    error: Optional[str] = Field(default=None, description="错误信息（若有）")
+
+
+class A2ATaskStatusResponse(BaseModel):
+    """A2A 任务状态查询响应（对应 tasks/get）"""
+    task_id: str = Field(..., description="任务 ID")
+    state: str = Field(..., description="任务状态")
+    agent_name: str = Field(default="", description="执行该任务的 Agent 名称")
+    messages: List[dict] = Field(default_factory=list, description="消息历史")
+    artifacts: List[dict] = Field(default_factory=list, description="产物列表")
+    status: dict = Field(default_factory=dict, description="完整状态对象（含 state/timestamp）")
+
+
+class A2ATaskCancelResponse(BaseModel):
+    """A2A 任务取消响应（对应 tasks/cancel）"""
+    task_id: str = Field(..., description="任务 ID")
+    canceled: bool = Field(..., description="是否成功取消")
+    state: str = Field(..., description="当前任务状态")
+    reason: Optional[str] = Field(default=None, description="失败原因")
+
+
 class MCPToolCallRequest(BaseModel):
     """MCP 工具调用请求"""
     tool_name: str = Field(..., description="工具名称")

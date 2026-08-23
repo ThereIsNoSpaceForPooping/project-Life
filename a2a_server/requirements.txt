@@ -1,13 +1,15 @@
 # A2A Server 依赖
-fastapi>=0.100.0
-uvicorn>=0.23.0
-pydantic>=2.0.0
+#
+# 协议规范：https://google-a2a.github.io/A2A/
+#
+# 我们使用 Starlette 而非 FastAPI，因为：
+#   1. Starlette 是 ASGI 原生实现，更轻量
+#   2. A2A 协议层只需要 HTTP 路由和 SSE，不需要 OpenAPI 自动生成
+#   3. 更少抽象层，更易控制协议细节
+
+# Web 框架
+starlette>=0.40.0
+uvicorn[standard]>=0.30.0
+
+# 环境变量
 python-dotenv>=1.0.0
-
-# LLM 依赖
-langchain>=0.1.0
-langchain-openai>=0.1.0
-langchain-community>=0.0.10
-
-# HTTP 客户端
-httpx>=0.24.0

@@ -1,303 +1,300 @@
 # -*- coding: utf-8 -*-
 """
-MCP Server - 主入口
+MCP Server - 真实 MCP 协议实现
 
-提供 MCP 协议的 HTTP 服务端。
+基于 Anthropic 官方 MCP（Model Context Protocol）Python SDK 实现，
+符合 MCP 规范 2025-03-26。
 
-v2 功能：
-    - 写死响应模式（FAKE_MODE）：用于开发/测试阶段，避免依赖真实文件系统/数据库
-    - 生产环境可通过 FAKE_MODE=False 切换回真实工具执行
+官方规范：https://modelcontextprotocol.io
+官方 SDK：https://github.com/modelcontextprotocol/python-sdk
+
+特性：
+    - 传输层：Streamable HTTP（推荐） + stdio
+    - 协议：JSON-RPC 2.0
+    - 能力：tools / resources / prompts
+    - 工具数量：13 个（file / db / http / code）
+
+运行方式：
+    # Streamable HTTP 模式（推荐，端口 8001）
+    python main.py
+
+    # stdio 模式（用于 Claude Desktop 等本地客户端）
+    python main.py --stdio
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, Any, Optional
+import argparse
+import asyncio
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+# ============================================================
+# 路径与环境配置
+# ============================================================
+# 将当前目录加入 Python 路径，确保 tools 包可被导入
+BASE_DIR: Path = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
+
+# 加载 .env 环境变量
+from dotenv import load_dotenv
+
+load_dotenv(BASE_DIR / ".env")
+
+# ============================================================
+# 日志配置
+# ============================================================
+# 使用统一格式：时间 | 级别 | 模块 | 消息
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s | %(levelname)-7s | %(name)-20s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger: logging.Logger = logging.getLogger("mcp_server")
+
+# ============================================================
+# 尝试导入官方 MCP SDK
+# ============================================================
+# 官方 SDK 路径：mcp.server.fastmcp.FastMCP
+# 如果未安装，提供清晰的错误提示
+try:
+    from mcp.server import Server
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.stdio import stdio_server
+    from mcp.types import (
+        CallToolRequest,
+        ListToolsRequest,
+        TextContent,
+    )
+
+    MCP_SDK_AVAILABLE: bool = True
+    logger.info("[启动] 已加载官方 MCP SDK (mcp.server.fastmcp.FastMCP)")
+except ImportError as exc:  # pragma: no cover
+    MCP_SDK_AVAILABLE = False
+    logger.error(
+        "[启动] 未找到官方 MCP SDK: %s\n"
+        "请执行: pip install mcp[cli]>=1.0.0\n"
+        "安装地址: https://github.com/modelcontextprotocol/python-sdk",
+        exc,
+    )
+    raise SystemExit(1) from exc
+
+# ============================================================
+# 业务模块导入
+# ============================================================
+# 配置
 from config import Config
-from tools.registry import tool_registry
 
-# 创建 FastAPI 应用
-app = FastAPI(
-    title="MCP Server",
-    description="Model Context Protocol Server - 提供工具调用能力",
-    version="1.0.0"
+# 工具实现（四个领域）
+from tools.file_tools import register_file_tools
+from tools.db_tools import register_db_tools
+from tools.http_tools import register_http_tools
+from tools.code_tools import register_code_tools
+
+
+# ============================================================
+# MCP Server 实例
+# ============================================================
+# FastMCP 是官方推荐的 Server 封装：
+#   - 内部使用 mcp.server.Server（完整协议实现）
+#   - 自动注册 tool 装饰器
+#   - 同时支持 Streamable HTTP / SSE / stdio 三种传输
+# 配置说明：
+#   - instructions：用于在 initialize 阶段返回给客户端
+#   - host/port：Streamable HTTP 监听地址
+MCP_SERVER_NAME: str = os.getenv("MCP_SERVER_NAME", "project-life-mcp")
+MCP_SERVER_HOST: str = os.getenv("MCP_SERVER_HOST", Config.HOST)
+MCP_SERVER_PORT: int = int(os.getenv("MCP_SERVER_PORT", str(Config.PORT)))
+
+# 创建 FastMCP 实例
+mcp: FastMCP = FastMCP(
+    name=MCP_SERVER_NAME,
+    instructions=(
+        "Project-Life MCP Server 提供 13 个工具，"
+        "涵盖文件操作、数据库查询、HTTP 请求、Python 代码执行。"
+        "所有工具遵循 JSON-RPC 2.0 协议，可通过 Streamable HTTP 接入。"
+    ),
+    host=MCP_SERVER_HOST,
+    port=MCP_SERVER_PORT,
 )
 
-# 配置 CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 # ============================================================
-# v2 写死响应模式配置
+# 注册所有工具
 # ============================================================
-
-# FAKE_MODE 开关：
-# - True（默认）：工具调用直接返回写死数据，适用于开发/测试/演示
-# - False：执行真实工具逻辑，适用于生产环境
-# 
-# 使用场景：
-# 1. 开发阶段：前端/后端联调时，无需部署真实数据库/文件系统
-# 2. 演示阶段：保证工具调用链路完整，展示效果稳定
-# 3. 单元测试：避免测试用例依赖外部环境
-FAKE_MODE: bool = True
-
-# 写死响应映射表：工具名 → 固定返回值
-# 
-# 设计原则：
-# - 返回值结构与真实工具输出一致（JSON 可序列化）
-# - 包含足够的信息量，便于 Agent 组织回答
-# - 明确标注"写死数据"，避免用户误以为来自真实数据源
-FAKE_RESPONSES: dict[str, dict] = {
-    # ========== 文件操作工具 ==========
-    "file_read": {
-        "content": "【MCP 写死数据】这是 README.md 的内容\n\n# Project Life\n\n这是一个 LangGraph 高级功能演示项目。\n\n## 特性\n- 子图编排\n- 人机协作\n- Map-Reduce 并行\n- MCP 工具集成\n- A2A Agent 协作\n\n## 快速开始\n```bash\npython main.py\n```\n\n（注：此为写死测试数据，非真实文件内容）"
-    },
-    "file_write": {
-        "status": "ok",
-        "message": "文件写入成功（写死模式）",
-        "path": "output.md",
-        "bytes_written": 1024
-    },
-    "file_list": {
-        "files": [
-            "README.md",
-            "docs/",
-            "src/",
-            "tests/",
-            ".gitignore",
-            "requirements.txt"
-        ],
-        "count": 6
-    },
-    "file_delete": {
-        "status": "ok",
-        "message": "文件删除成功（写死模式）",
-        "path": "temp.txt"
-    },
-    
-    # ========== 数据库操作工具 ==========
-    "db_query": {
-        "rows": [
-            {"id": 1, "name": "张三", "age": 28, "email": "zhangsan@example.com"},
-            {"id": 2, "name": "李四", "age": 32, "email": "lisi@example.com"},
-            {"id": 3, "name": "王五", "age": 25, "email": "wangwu@example.com"}
-        ],
-        "total": 3,
-        "columns": ["id", "name", "age", "email"]
-    },
-    "db_execute": {
-        "affected_rows": 1,
-        "status": "ok",
-        "message": "SQL 执行成功（写死模式）"
-    },
-    "db_tables": {
-        "tables": ["users", "orders", "products", "categories"],
-        "count": 4
-    },
-    "db_schema": {
-        "table": "users",
-        "columns": [
-            {"name": "id", "type": "INT", "nullable": False, "primary_key": True},
-            {"name": "name", "type": "VARCHAR(255)", "nullable": False, "primary_key": False},
-            {"name": "email", "type": "VARCHAR(255)", "nullable": True, "primary_key": False},
-            {"name": "created_at", "type": "TIMESTAMP", "nullable": False, "primary_key": False}
-        ]
-    },
-    
-    # ========== HTTP 请求工具 ==========
-    "http_request": {
-        "status_code": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": '{"message": "OK（写死模式）", "timestamp": "2026-08-05T00:00:00Z"}'
-    },
-    "http_get": {
-        "status_code": 200,
-        "headers": {"Content-Type": "text/plain"},
-        "body": "GET request successful（写死模式）"
-    },
-    "http_post": {
-        "status_code": 201,
-        "headers": {"Content-Type": "application/json"},
-        "body": '{"id": 101, "created": true, "message": "POST request successful（写死模式）"}'
-    },
-    
-    # ========== 代码执行工具 ==========
-    "code_execute": {
-        "output": "Hello, World!\n【写死模式】代码执行完成\n",
-        "exit_code": 0,
-        "execution_time_ms": 15
-    },
-    "code_evaluate": {
-        "result": 42,
-        "error": None,
-        "type": "integer"
-    }
-}
-
-
-# ============================================================
-# 请求/响应模型
-# ============================================================
-
-class ToolCallRequest(BaseModel):
-    """工具调用请求"""
-    tool_name: str
-    arguments: Dict[str, Any] = {}
-
-
-class ToolCallResponse(BaseModel):
-    """工具调用响应"""
-    result: Any
-    is_error: bool = False
-
-
-class ToolInfo(BaseModel):
-    """工具信息"""
-    name: str
-    description: str
-    parameters: Dict[str, Any]
-
-
-# ============================================================
-# API 接口
-# ============================================================
-
-@app.get("/health")
-async def health_check():
-    """健康检查"""
-    return {"status": "ok", "service": "mcp_server"}
-
-
-@app.get("/mcp/tools/list", response_model=list[ToolInfo])
-async def list_tools():
+# 领域一：文件操作（4 个）
+#   file_read / file_write / file_list / file_delete
+# 领域二：数据库操作（4 个）
+#   db_query / db_execute / db_tables / db_schema
+# 领域三：HTTP 请求（3 个）
+#   http_request / http_get / http_post
+# 领域四：代码执行（2 个）
+#   code_execute / code_evaluate
+def _register_all_tools() -> int:
     """
-    列出所有可用工具
-    
+    注册所有业务工具到 FastMCP 实例
+
+    各领域工具在自己的模块中通过 @mcp.tool() 装饰器注册，
+    此函数仅用于触发模块加载并返回工具数量。
+
     Returns:
-        工具列表
+        注册的工具数量
     """
-    return tool_registry.get_all_tools()
+    file_count: int = register_file_tools(mcp)
+    db_count: int = register_db_tools(mcp)
+    http_count: int = register_http_tools(mcp)
+    code_count: int = register_code_tools(mcp)
 
-
-@app.post("/mcp/tools/call", response_model=ToolCallResponse)
-async def call_tool(request: ToolCallRequest):
-    """
-    调用指定工具
-    
-    Args:
-        request: 工具调用请求
-    
-    Returns:
-        工具执行结果
-    
-    v2 变更：
-        - 支持写死响应模式（FAKE_MODE=True 时直接返回固定数据）
-        - 写死模式适用于开发/测试/演示，避免依赖真实环境
-    """
-    # 检查工具是否存在
-    tool = tool_registry.get_tool(request.tool_name)
-    if not tool:
-        raise HTTPException(
-            status_code=404,
-            detail=f"工具不存在: {request.tool_name}"
-        )
-    
-    # ============================================================
-    # v2: 写死响应模式分支
-    # ============================================================
-    # 如果 FAKE_MODE 开启，直接从 FAKE_RESPONSES 获取写死数据
-    # 这样 Agent 调用工具时能拿到完整数据，链路不会中断
-    if FAKE_MODE:
-        # 尝试从写死映射表获取固定响应
-        if request.tool_name in FAKE_RESPONSES:
-            result = FAKE_RESPONSES[request.tool_name]
-            print(f"[FAKE_MODE] 工具 {request.tool_name} 返回写死数据")
-        else:
-            # 如果映射表中没有，返回通用默认值
-            result = {
-                "status": "ok",
-                "message": f"工具 {request.tool_name} 调用成功（写死模式 - 默认响应）",
-                "echo_args": request.arguments
-            }
-            print(f"[FAKE_MODE] 工具 {request.tool_name} 未在映射表中，返回默认数据")
-        
-        return ToolCallResponse(result=result, is_error=False)
-    
-    # ============================================================
-    # 真实执行模式（FAKE_MODE=False）
-    # ============================================================
-    # 调用工具
-    result = await tool_registry.call_tool(
-        request.tool_name,
-        request.arguments
+    total: int = file_count + db_count + http_count + code_count
+    logger.info(
+        "[注册] 工具已全部注册: file=%d, db=%d, http=%d, code=%d, total=%d",
+        file_count,
+        db_count,
+        http_count,
+        code_count,
+        total,
     )
-    
-    # 检查是否有错误
-    is_error = isinstance(result, dict) and "error" in result
-    
-    return ToolCallResponse(
-        result=result,
-        is_error=is_error
-    )
-
-
-@app.get("/mcp/tools/{tool_name}", response_model=ToolInfo)
-async def get_tool_info(tool_name: str):
-    """
-    获取工具详情
-    
-    Args:
-        tool_name: 工具名称
-    
-    Returns:
-        工具信息
-    """
-    tool = tool_registry.get_tool(tool_name)
-    
-    if not tool:
-        raise HTTPException(
-            status_code=404,
-            detail=f"工具不存在: {tool_name}"
-        )
-    
-    return ToolInfo(
-        name=tool["name"],
-        description=tool["description"],
-        parameters=tool["parameters"]
-    )
+    return total
 
 
 # ============================================================
 # 启动入口
 # ============================================================
+def _print_banner(tool_count: int, transport: str) -> None:
+    """
+    打印启动横幅
+
+    Args:
+        tool_count: 已注册工具数量
+        transport: 传输模式（http / stdio）
+    """
+    print(
+        f"""
+╔═══════════════════════════════════════════════════════════╗
+║           MCP Server (Anthropic MCP 协议)                ║
+╠═══════════════════════════════════════════════════════════╣
+║  传输模式: {transport:<44} ║
+║  监听地址: {f"{MCP_SERVER_HOST}:{MCP_SERVER_PORT}":<44} ║
+║  工具数量: {tool_count:<44} ║
+║  协议版本: 2025-03-26 (JSON-RPC 2.0)                      ║
+╠═══════════════════════════════════════════════════════════╣
+║  工具分类:                                                ║
+║   • file_read / file_write / file_list / file_delete      ║
+║   • db_query / db_execute / db_tables / db_schema         ║
+║   • http_request / http_get / http_post                   ║
+║   • code_execute / code_evaluate                          ║
+╠═══════════════════════════════════════════════════════════╣
+║  客户端接入:                                              ║
+║   Streamable HTTP  → http://{MCP_SERVER_HOST}:{MCP_SERVER_PORT}/mcp  ║
+║   健康检查        → http://{MCP_SERVER_HOST}:{MCP_SERVER_PORT}/health ║
+╚═══════════════════════════════════════════════════════════╝
+"""
+    )
+
+
+async def run_http() -> None:
+    """
+    以 Streamable HTTP 模式启动 MCP Server
+
+    Streamable HTTP 是 MCP 2025-03-26 规范推荐的传输方式，
+    单端点 /mcp 同时支持 GET（建立 SSE 流）和 POST（发送请求）。
+    """
+    # 注册业务工具
+    tool_count: int = _register_all_tools()
+
+    # 打印启动横幅
+    _print_banner(tool_count, "Streamable HTTP")
+
+    # 添加自定义健康检查路由
+    # FastMCP 内部是 Starlette 应用，可直接挂载路由
+    try:
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def health(_request):  # noqa: ANN001
+            """健康检查端点（HTTP / 非 MCP 协议）"""
+            return JSONResponse(
+                {
+                    "status": "ok",
+                    "service": MCP_SERVER_NAME,
+                    "protocol": "MCP",
+                    "version": "2025-03-26",
+                    "tools": tool_count,
+                }
+            )
+
+        # 在内部 Starlette 应用上添加路由
+        if hasattr(mcp, "_app") and mcp._app is not None:
+            mcp._app.router.routes.append(Route("/health", endpoint=health))
+            logger.info("[启动] 已挂载 /health 健康检查路由")
+    except Exception as exc:  # pragma: no cover
+        logger.warning("[启动] 挂载 /health 失败（不影响 MCP 协议）: %s", exc)
+
+    # 启动 Streamable HTTP 服务
+    # run() 内部会使用 uvicorn 启动 Starlette 应用
+    logger.info(
+        "[启动] Streamable HTTP 监听: http://%s:%d/mcp",
+        MCP_SERVER_HOST,
+        MCP_SERVER_PORT,
+    )
+    await mcp.run(transport="streamable-http")
+
+
+async def run_stdio() -> None:
+    """
+    以 stdio 模式启动 MCP Server
+
+    stdio 模式用于本地进程通信（如 Claude Desktop），
+    通过 stdin/stdout 交换 JSON-RPC 消息。
+    """
+    # 注册业务工具
+    tool_count: int = _register_all_tools()
+    _print_banner(tool_count, "stdio")
+
+    logger.info("[启动] stdio 模式启动（通过 stdin/stdout 通信）")
+
+    # stdio_server 是官方 SDK 提供的异步上下文管理器
+    async with stdio_server() as (read_stream, write_stream):
+        # 获取底层 Server 实例并运行
+        # mcp._server 是 FastMCP 内部的 Server 实例
+        server: Server = mcp._server  # type: ignore[attr-defined]
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
+
+
+def main() -> None:
+    """
+    主入口：解析命令行参数并选择传输模式
+
+    支持：
+        python main.py            # 默认 Streamable HTTP
+        python main.py --stdio    # stdio 模式
+    """
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description="MCP Server - 真实 Anthropic MCP 协议实现"
+    )
+    parser.add_argument(
+        "--stdio",
+        action="store_true",
+        help="使用 stdio 传输（用于本地 MCP 客户端）",
+    )
+    args: argparse.Namespace = parser.parse_args()
+
+    try:
+        if args.stdio:
+            asyncio.run(run_stdio())
+        else:
+            asyncio.run(run_http())
+    except KeyboardInterrupt:  # pragma: no cover
+        logger.info("[关闭] 用户中断，正在退出...")
+    except Exception as exc:  # pragma: no cover
+        logger.exception("[异常] MCP Server 运行失败: %s", exc)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    import uvicorn
-    
-    print(f"""
-╔═══════════════════════════════════════════════════════════╗
-║                    MCP Server                             ║
-╠═══════════════════════════════════════════════════════════╣
-║  端口: {Config.PORT}                                        ║
-║  工具数量: {len(tool_registry.get_all_tools())}                              ║
-║                                                           ║
-║  可用工具:                                                ║
-║  - file_read / file_write / file_list / file_delete       ║
-║  - db_query / db_execute / db_tables / db_schema          ║
-║  - http_request / http_get / http_post                    ║
-║  - code_execute / code_evaluate                           ║
-╚═══════════════════════════════════════════════════════════╝
-    """)
-    
-    uvicorn.run(
-        app,
-        host=Config.HOST,
-        port=Config.PORT
-    )
+    main()

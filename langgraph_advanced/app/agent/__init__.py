@@ -22,14 +22,10 @@ Agent 模块聚合导出层（Facade）
     - app.agent.multi      : 多 Agent 协作（Supervisor-Worker 简化版）
     - app.agent.subagent   : Subagent 子图（Supervisor-Worker 完整版）
     - app.agent.shared     : 共享基础设施（LLM / Tool / Map-Reduce）
+    - app.agent.advanced   : 高级特性独立图（Map-Reduce / Parallel / Time-Travel ...）
     - app.agent.a2a        : A2A 协议相关
     - app.agent.mcp        : MCP 工具协议相关
     - app.agent.middleware : 中间件（prebuilt 工具节点 / 死循环守卫）
-
-历史说明：
-    原 app.agent.advanced 子包（subgraph/parallel/interrupt/mapreduce/
-    dynamic_tools/time_travel 6 个 demo 图）已全部下线删除，
-    全部能力整合到 app.agent.master 统一大图。
 """
 
 # ============================================================

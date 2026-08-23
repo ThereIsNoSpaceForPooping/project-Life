@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
-"""A2A Server Agent 模块"""
+"""
+A2A Agents 模块
+"""
 
-from agents.registry import agent_registry, AgentRegistry
-from agents.researcher import researcher_agent, ResearcherAgent
-from agents.coder import coder_agent, CoderAgent
-from agents.translator import translator_agent, TranslatorAgent
-from agents.analyzer import analyzer_agent, AnalyzerAgent
+from agents.base import BaseAgent
+from agents.registry import AgentRegistry, agent_registry
+from agents.researcher import ResearcherAgent
+from agents.coder import CoderAgent
+from agents.translator import TranslatorAgent
+from agents.analyzer import AnalyzerAgent
 
 __all__ = [
-    "agent_registry",
+    "BaseAgent",
     "AgentRegistry",
-    "researcher_agent",
+    "agent_registry",
     "ResearcherAgent",
-    "coder_agent",
     "CoderAgent",
-    "translator_agent",
     "TranslatorAgent",
-    "analyzer_agent",
     "AnalyzerAgent",
 ]

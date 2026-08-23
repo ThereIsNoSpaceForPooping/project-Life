@@ -1,80 +1,61 @@
 # -*- coding: utf-8 -*-
 """
-A2A Server - 分析 Agent
-
-专注于数据分析和洞察。
+Analyzer Agent
 """
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-from config import Config
+import asyncio
+from typing import Any, Dict, List
+
+from agents.base import BaseAgent
 
 
-class AnalyzerAgent:
-    """分析 Agent - 数据分析和洞察"""
-    
-    def __init__(self):
-        self.llm = ChatOpenAI(
-            model=Config.LLM_MODEL,
-            api_key=Config.LLM_API_KEY,
-            base_url=Config.LLM_BASE_URL,
-            temperature=0.5
+class AnalyzerAgent(BaseAgent):
+    """
+    分析助手 Agent
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="analyzer",
+            description="分析助手：负责数据分析、趋势洞察、统计",
+            skills=[
+                {
+                    "id": "analyze-data",
+                    "name": "数据分析",
+                    "description": "对数据集进行统计分析",
+                    "tags": ["analyze", "data"],
+                    "examples": ["分析这组销售数据的趋势"],
+                },
+                {
+                    "id": "analyze-trend",
+                    "name": "趋势分析",
+                    "description": "识别时间序列中的趋势和异常",
+                    "tags": ["trend", "timeseries"],
+                    "examples": ["分析最近一周的访问量趋势"],
+                },
+            ],
         )
-        
-        self.system_prompt = """你是一个专业的数据分析助手，擅长从数据中提取洞察。
 
-你的职责：
-1. 分析提供的数据或文本
-2. 识别关键模式和趋势
-3. 提供有价值的洞察和建议
-4. 用清晰的方式呈现分析结果
+    async def run(
+        self,
+        user_text: str,
+        history: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        await asyncio.sleep(0.2)
 
-请提供客观、有数据支持的分析。"""
-    
-    async def process(self, input_data: dict) -> dict:
-        """
-        处理分析任务
-        
-        Args:
-            input_data: {
-                "data": "待分析的数据或文本",
-                "analysis_type": "类型：trend/pattern/summary"
-            }
-        
-        Returns:
-            {"analysis": "分析结果", "insights": ["洞察列表"]}
-        """
-        data = input_data.get("data", "")
-        analysis_type = input_data.get("analysis_type", "summary")
-        
-        # 根据分析类型构建提示
-        type_prompts = {
-            "trend": "请分析以下数据的趋势：",
-            "pattern": "请识别以下数据中的模式：",
-            "summary": "请对以下内容进行总结分析："
-        }
-        
-        prompt = type_prompts.get(analysis_type, type_prompts["summary"])
-        user_content = f"{prompt}\n\n{data}"
-        
-        # 构建消息
-        messages = [
-            SystemMessage(content=self.system_prompt),
-            HumanMessage(content=user_content)
-        ]
-        
-        # 调用 LLM
-        response = await self.llm.ainvoke(messages)
-        
+        output: str = (
+            f"[Analyzer] 收到分析请求。\n\n"
+            f"分析对象: {user_text}\n\n"
+            f"（分析结果占位 - 生产环境对接数据分析 / Pandas）"
+        )
+
         return {
-            "analysis": response.content,
-            "insights": [
-                "关键发现已识别",
-                "建议进一步验证",
-                "可考虑相关因素的影响"
-            ]
+            "output": output,
+            "artifacts": [
+                {
+                    "name": "analysis-report",
+                    "description": "分析报告",
+                    "parts": [{"type": "text", "text": output}],
+                }
+            ],
         }
-
-
-# 全局实例
-analyzer_agent = AnalyzerAgent()

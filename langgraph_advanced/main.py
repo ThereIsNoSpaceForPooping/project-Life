@@ -64,12 +64,34 @@ async def lifespan(app):
     """
     FastAPI 现代 lifespan 事件（替代已废弃的 @app.on_event("startup")）
 
-    在应用启动时执行 startup_init() 加载外部工具。
+    在应用启动时执行 startup_init() 加载外部工具，
+    在应用关闭时清理 MCP/A2A 连接。
     """
     # ===== startup =====
     await startup_init()
     yield
-    # ===== shutdown ===== （暂无需清理）
+    # ===== shutdown =====
+    logger.info("=" * 60)
+    logger.info("正在清理外部工具连接...")
+    logger.info("=" * 60)
+
+    # 关闭 A2A 连接
+    try:
+        from app.agent.a2a.tools_loader import close_a2a_tools
+        await close_a2a_tools()
+        logger.info("A2A 连接已关闭")
+    except Exception as e:
+        logger.warning(f"关闭 A2A 连接失败: {e}")
+
+    # 关闭 MCP 连接
+    try:
+        from app.agent.mcp.tools_loader import close_mcp_tools
+        await close_mcp_tools()
+        logger.info("MCP 连接已关闭")
+    except Exception as e:
+        logger.warning(f"关闭 MCP 连接失败: {e}")
+
+    logger.info("清理完成")
 
 
 # 把 lifespan 挂到 app（替换旧的 on_event 装饰器）

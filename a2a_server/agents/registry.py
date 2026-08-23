@@ -1,90 +1,77 @@
 # -*- coding: utf-8 -*-
 """
-A2A Server - Agent 注册表
-
-集中管理所有 Agent。
+A2A Agents - 注册表
 """
 
 import logging
-from agents.researcher import researcher_agent
-from agents.coder import coder_agent
-from agents.translator import translator_agent
-from agents.analyzer import analyzer_agent
+from typing import Any, Dict, List, Optional
 
-# 模块级 logger（修复 logger 未定义 bug）
-logger = logging.getLogger(__name__)
+from agents.base import BaseAgent
+from agents.researcher import ResearcherAgent
+from agents.coder import CoderAgent
+from agents.translator import TranslatorAgent
+from agents.analyzer import AnalyzerAgent
+
+logger: logging.Logger = logging.getLogger("a2a.agents.registry")
 
 
 class AgentRegistry:
-    """Agent 注册表"""
-    
-    def __init__(self):
-        self._agents = {
-            "researcher": {
-                "instance": researcher_agent,
-                "description": "研究助手 - 信息搜索和整理",
-                "capabilities": ["search", "analyze", "summarize"]
-            },
-            "coder": {
-                "instance": coder_agent,
-                "description": "编码助手 - 代码生成和审查",
-                "capabilities": ["generate", "review", "explain"]
-            },
-            "translator": {
-                "instance": translator_agent,
-                "description": "翻译助手 - 多语言翻译",
-                "capabilities": ["translate"]
-            },
-            "analyzer": {
-                "instance": analyzer_agent,
-                "description": "分析助手 - 数据分析和洞察",
-                "capabilities": ["trend", "pattern", "summary"]
-            }
-        }
-    
-    def get_agent(self, name: str):
-        """获取 Agent 实例"""
-        agent_info = self._agents.get(name)
-        return agent_info["instance"] if agent_info else None
-    
-    def get_all_agents(self) -> list:
-        """获取所有 Agent 列表"""
-        return [
-            {
-                "name": name,
-                "description": info["description"],
-                "capabilities": info["capabilities"]
-            }
-            for name, info in self._agents.items()
-        ]
-    
-    async def process_task(self, agent_name: str, input_data: dict) -> dict:
+    """
+    Agent 注册表
+
+    集中管理所有可用 Agent，并提供 AgentCard 生成。
+    """
+
+    def __init__(self) -> None:
+        self._agents: Dict[str, BaseAgent] = {}
+        self._register_default_agents()
+
+    def _register_default_agents(self) -> None:
+        """注册默认的 4 个 Agent"""
+        for agent in (
+            ResearcherAgent(),
+            CoderAgent(),
+            TranslatorAgent(),
+            AnalyzerAgent(),
+        ):
+            self.register(agent)
+
+    def register(self, agent: BaseAgent) -> None:
         """
-        处理任务
-        
+        注册 Agent
+
         Args:
-            agent_name: Agent 名称
-            input_data: 输入数据
-        
-        Returns:
-            处理结果
+            agent: Agent 实例
         """
-        logger.info(f"[A2A] 调用 Agent: {agent_name}, 输入: {input_data}")
-        
-        agent = self.get_agent(agent_name)
-        
-        if not agent:
-            logger.error(f"[A2A] Agent 不存在: {agent_name}")
-            return {"error": f"Agent 不存在: {agent_name}"}
-        
-        try:
-            result = await agent.process(input_data)
-            logger.info(f"[A2A] Agent {agent_name} 执行成功, 返回: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"[A2A] Agent {agent_name} 执行失败: {str(e)}")
-            return {"error": f"Agent 执行失败: {str(e)}"}
+        self._agents[agent.name] = agent
+        logger.info(
+            "[Registry] 注册 Agent: %s, skills=%d",
+            agent.name, len(agent.skills),
+        )
+
+    def get_agent(self, name: str) -> Optional[BaseAgent]:
+        """获取 Agent"""
+        return self._agents.get(name)
+
+    def has_agent(self, name: str) -> bool:
+        """是否存在"""
+        return name in self._agents
+
+    def list_agents(self) -> List[BaseAgent]:
+        """所有 Agent"""
+        return list(self._agents.values())
+
+    def list_agent_names(self) -> List[str]:
+        """所有 Agent 名称"""
+        return list(self._agents.keys())
+
+    def get_all_skills(self) -> List[Dict[str, Any]]:
+        """所有技能（用于 AgentCard）"""
+        skills: List[Dict[str, Any]] = []
+        for agent in self._agents.values():
+            skills.extend(agent.get_skill_dicts())
+        return skills
 
 
-# 全局 Agent 注册表
-agent_registry = AgentRegistry()
+# 全局单例
+agent_registry: AgentRegistry = AgentRegistry()
