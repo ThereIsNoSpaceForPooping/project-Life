@@ -461,11 +461,14 @@
                 <span class="exp-date" style="margin-left: auto;">2024.10 – 至今</span>
             </div>
             <div class="project-desc">
-                基于 TRIZ 创新理论构建的智能体，面向内部研究人员/设计人员，实现技术问题分析与求解、创新解决方案自动生成。
+                基于 TRIZ 创新理论构建的三阶段多轮对话智能体，面向内部研究人员/设计人员，以 Stage-Gating + ReAct 驱动求解流程，结合专利知识库 RAG 自动生成可靠的创新解决方案。
             </div>
             <ul class="exp-list">
                 <li>主导 Agent 技术方案设计：LLM 选型、Agent 框架选型、执行模式设计</li>
-                <li>主导 RAG 模块设计与实现：多域并发检索，解决纯语义匹配的业务相关性差问题</li>
+                <li>Agent Loop：Stage-Gating 门控串联三阶段求解流程，阶段内 ReAct 驱动推理与工具调用；方案生成阶段采用 TOT 并行展开多候选分支，逐层评估剪枝收敛至最优方案</li>
+                <li>Multi-Domain RAG：与高校合作研发多域检索增强算法，突破传统 Hybrid Retrieval 方案同质化、创新性不足的瓶颈</li>
+                <li>Tagging &amp; Embedding：基于 Milvus + MySQL 构建独立专利知识库，完成专利知识 TRIZ 打标与向量化入库流水线</li>
+                <li>Async Pipeline：Redis + 线程池构建异步任务链路，统一控制 LLM 并发；循环检测识别死循环并自动切换策略，避免 Token 无效消耗</li>
                 <li>基于 MCP 协议对接企业内部工具，工具可插拔、跨 Agent 复用</li>
             </ul>
             <div class="tags">
@@ -481,13 +484,16 @@
                 <span class="exp-date" style="margin-left: auto;">2025.08 – 2026.04</span>
             </div>
             <div class="project-desc">
-                面向研究人员的智能体，支持信息检索、研究报告与技术分析产出。联动云文档读写，支持文档问答与自动写入。
+                对标 Google Notebook 的深度研究智能体，由 Retrieval Agent 与 Notebook Agent 双模块组成，支持文献检索、深度研究（对比差异、逻辑梳理、报告总结）与笔记沉淀至云文档，两种模式会话内热切换。
             </div>
             <ul class="exp-list">
                 <li>主导 Agent 技术方案设计，包括 LLM 选型、框架选型、执行模式设计</li>
-                <li>HITL 反馈机制：通过人工节点进行 Plan Review 与工具调用确认</li>
-                <li>并行检索：通过 Map-Reduce 实现单节点并发任务执行与结果聚合</li>
-                <li>基于 A2A 协议实现多 Agent 协作，能力可发现、任务可异步</li>
+                <li>Agent Loop：HITL Plan &amp; Execute，通过人工节点进行 Plan Review 与工具调用确认</li>
+                <li>Context Compression：会话摘要替换原始历史；文档分层摘要树按需下钻，总结任务只读摘要树不读原文；Sandbox 全文解析 + Chunked Summarization 支撑文献级全局总结</li>
+                <li>File Reader Tool：分批摘要 + 分层聚合，突破 Context Window 限制实现长文档全量语义读取；Parent-Child Chunking 兼顾检索精度与上下文完整性</li>
+                <li>检索与生成优化：Query 改写分解（HyDE、Step-back）、引用溯源防幻觉、提示词位置优化规避 Lost in the Middle</li>
+                <li>工程化治理：全链路 Trace 可观测、回归评测集 + LLM-as-Judge、循环检测、模型降级兜底</li>
+                <li>并行检索：通过 Map-Reduce 实现单节点并发任务执行与结果聚合；基于 A2A 协议实现多 Agent 协作，能力可发现、任务可异步</li>
             </ul>
             <div class="tags">
                 <span class="tag">LangGraph</span><span class="tag">FastAPI</span><span class="tag">A2A</span><span class="tag">MCP</span><span class="tag">RAG</span><span class="tag">MySQL</span><span class="tag">Redis</span>

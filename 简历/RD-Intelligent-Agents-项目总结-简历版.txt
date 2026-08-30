@@ -1,0 +1,22 @@
+**TRIZ 智能体（TRIZ Agent）**
+
+**Agent Loop：Stage-Gating + ReAct** LangGraph
+**概述：**TRIZ 是一套成熟的创新问题求解理论。TRIZ 智能体将其建模为三阶段多轮对话 Agent：以 Stage-Gating 门控机制串联求解流程，阶段内采用 ReAct（Reasoning + Acting）范式驱动推理与工具调用，并结合专利知识库 RAG，为研究人员生成可靠的创新解决方案。
+
+**TOT（Tree of Thoughts）：**方案生成阶段并行展开多条候选解题分支，逐层评估、剪枝与回溯，最终收敛至最优创新方案，突破单路径生成的多样性局限。
+**Multi-Domain RAG：**与高校合作研发多域检索增强算法，将专利与用户问题映射到同一套求解模型，提取解决方案主框架、分离作用主体，从本域、近域、远域三域进行检索融合，突破传统 Hybrid Retrieval 方案同质化、创新性不足的瓶颈。
+**Tagging & Embedding：**基于 Milvus + MySQL 构建独立专利知识库，完成专利知识的 TRIZ Tagging 与向量化入库流水线。
+**异步任务执行器：**通过 Redis + 线程池构建异步任务链路，实现 LLM 调用的统一并发控制（Concurrency Control）。
+**LLM 适配器：**设计 Adaptor 层统一接入不同厂商的 LLM，屏蔽接口差异，实现 LLM 无感切换。
+**异常循环检测：**实时监控 ReAct 循环，识别重复工具调用/推理死循环后自动干预并切换策略，避免 Token 无效消耗与任务卡死。
+
+**深度研究智能体（Deep Research Agent）**
+
+**Agent Loop：HITL Plan & Execute** LangGraph
+**概述：**对标 Google Notebook，由 Retrieval Agent 与 Notebook Agent 双模块组成；用户提问后，Retrieval Agent 规划并执行检索方案（Plan & Execute）获取相关文献，Notebook Agent 对文献进行深度研究（对比差异、逻辑梳理、报告总结等），在多轮对话中提取所需笔记并沉淀至团队/个人云文档，两种模式支持会话内热切换。
+
+**上下文摘要与卸载：**每轮对话自动进行摘要替换，原文按需加载；加载前增量计算 Token，若上下文窗口占用超出 80% 则触发截断，仅保留近 3 轮摘要后再次计算，直至满足预算。
+**文档分层摘要树：**为每篇文献构建分层摘要树，分批并发摘要，兼容非结构化文档；总结类任务只读摘要树不读原文，任意结论可经路径溯源至原文。
+**Parent-Child Chunking：**以小粒度 Child Chunk 检索保证命中精度，命中后回传其所属 Parent 段落，兼顾精度与上下文完整性。
+**引用溯源：**生成结论强制附带文献引用（[文献, 章节]），可验证、防幻觉。
+**可观测性：**全链路 Trace 记录每步 Prompt、工具调用、耗时与 Token 消耗，支撑瓶颈与异常定位。

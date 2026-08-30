@@ -26,6 +26,18 @@
         -webkit-font-smoothing: antialiased;
     }
 
+    /* 标点与后文绑定，避免渲染行末出现标点 */
+    .np { white-space: nowrap; }
+
+    /* 段落两端对齐（中英文混排优化） */
+    .summary,
+    .project-desc,
+    .exp-list li,
+    .kv-list li {
+        text-align: justify;
+        text-justify: inter-ideograph;
+    }
+
     /* ===== A4 纸张 ===== */
     .page {
         max-width: 900px;
@@ -77,9 +89,13 @@
     .sidebar-role {
         text-align: center;
         font-size: 0.82em;
-        color: var(--muted);
-        font-weight: 400;
-        margin-bottom: 24px;
+        color: var(--ink);
+        font-weight: 700;
+        background: #f5f5f5;
+        width: fit-content;
+        margin: 0 auto 24px;
+        padding: 4px 14px;
+        border-radius: 3px;
     }
 
     /* 联系方式 */
@@ -235,6 +251,32 @@
         background: var(--ink);
     }
 
+    /* ===== 无圆点条目列表（项目介绍用） ===== */
+    .kv-list {
+        list-style: none;
+        padding: 0;
+    }
+
+    .kv-list li {
+        font-size: 0.84em;
+        color: var(--ink-2);
+        margin-bottom: 5px;
+        line-height: 1.65;
+    }
+
+    .kv-list li b {
+        color: var(--ink);
+        font-weight: 600;
+    }
+
+    .kv-group-title {
+        font-size: 0.84em;
+        font-weight: 600;
+        color: var(--ink);
+        margin: 6px 0 4px;
+        line-height: 1.65;
+    }
+
     /* ===== 项目块 ===== */
     .project-block {
         margin-bottom: 22px;
@@ -278,11 +320,11 @@
 
     .tag {
         font-size: 0.7em;
-        color: var(--ink-2);
+        color: var(--ink);
         background: #f5f5f5;
         padding: 2px 8px;
         border-radius: 3px;
-        font-weight: 500;
+        font-weight: 700;
     }
 
     /* ===== 响应式 ===== */
@@ -322,35 +364,40 @@
         }
         .sidebar {
             width: 195px !important;
-            padding: 28px 18px !important;
+            padding: 24px 16px !important;
             background: #f5f5f5 !important;
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
         }
         .main {
             flex: 1 !important;
-            padding: 28px 30px !important;
+            padding: 20px 24px !important;
         }
         .avatar {
-            width: 110px !important;
-            height: 110px !important;
+            width: 96px !important;
+            height: 96px !important;
+            margin-bottom: 14px !important;
         }
         .sidebar-name {
             font-size: 1.5em !important;
         }
         .sidebar-role {
             font-size: 0.82em !important;
+            margin-bottom: 16px !important;
         }
         .contact-item {
             font-size: 0.8em !important;
-            margin-bottom: 8px !important;
+            margin-bottom: 6px !important;
+        }
+        .sidebar-contact {
+            margin-bottom: 18px !important;
         }
         .sidebar-section {
-            margin-bottom: 20px !important;
+            margin-bottom: 16px !important;
         }
         .sidebar-section-title {
             font-size: 0.7em !important;
-            margin-bottom: 10px !important;
+            margin-bottom: 8px !important;
         }
         .edu-degree {
             font-size: 0.82em !important;
@@ -362,46 +409,61 @@
             font-size: 0.75em !important;
         }
         .section {
-            margin-bottom: 22px !important;
+            margin-bottom: 10px !important;
         }
         .section-title {
             font-size: 0.72em !important;
-            margin-bottom: 12px !important;
+            margin-bottom: 6px !important;
+            padding-bottom: 3px !important;
         }
         .summary {
-            font-size: 0.88em !important;
-            line-height: 1.75 !important;
+            font-size: 0.82em !important;
+            line-height: 1.5 !important;
         }
         .exp-item {
-            margin-bottom: 16px !important;
+            margin-bottom: 10px !important;
         }
         .exp-title {
-            font-size: 0.95em !important;
+            font-size: 0.92em !important;
         }
         .exp-date {
-            font-size: 0.78em !important;
+            font-size: 0.76em !important;
         }
         .exp-sub {
-            font-size: 0.82em !important;
-        }
-        .exp-list li {
-            font-size: 0.84em !important;
+            font-size: 0.8em !important;
             margin-bottom: 4px !important;
         }
+        .exp-list li {
+            font-size: 0.8em !important;
+            margin-bottom: 2px !important;
+            line-height: 1.5 !important;
+        }
         .project-block {
-            margin-bottom: 18px !important;
+            margin-bottom: 8px !important;
         }
         .project-name {
-            font-size: 0.95em !important;
+            font-size: 0.92em !important;
         }
         .project-type {
-            font-size: 0.74em !important;
+            font-size: 0.72em !important;
         }
         .project-desc {
-            font-size: 0.84em !important;
+            font-size: 0.8em !important;
+            line-height: 1.5 !important;
+            margin-bottom: 5px !important;
         }
         .tag {
-            font-size: 0.7em !important;
+            font-size: 0.68em !important;
+        }
+        .kv-list li {
+            font-size: 0.78em !important;
+            margin-bottom: 1px !important;
+            line-height: 1.45 !important;
+        }
+        .kv-group-title {
+            font-size: 0.8em !important;
+            margin: 3px 0 2px !important;
+            line-height: 1.45 !important;
         }
         .exp-item, .project-block {
             page-break-inside: avoid !important;
@@ -477,7 +539,7 @@
         <div class="section">
             <div class="section-title">Summary</div>
             <p class="summary">
-                具备 2 年企业级 Java 后端与 AI Agent 工程落地经验的工程师。专注于 LLM 应用范式（Supervisor / Plan-and-Execute / Pipeline），主导多 Agent 协作系统的方案设计与实现，熟悉 MCP、A2A、RAG、上下文工程、可观测性等核心模块。善于将业务问题转化为可执行的 AI 工作流，兼顾工程稳定性与前沿技术探索。
+                具备 2 年企业级 Java 后端与 AI Agent 工程落地经验的工程师。专注于 LLM 应用范式（Supervisor / Plan-and-Execute / ReAct），参与多 Agent 协作系统的方案设计与实现<span class="np">，熟悉</span> MCP、A2A、RAG、上下文工程、Agent观测，Agent评估等技术。善于将业务问题转化为可执行的 Agent Loop，兼顾工程稳定性与前沿技术探索。
             </p>
         </div>
 
@@ -491,9 +553,8 @@
                 </div>
                 <div class="exp-sub">Java 后端开发工程师</div>
                 <ul class="exp-list">
-                    <li>主导多个 AI Agent 项目的方案设计、核心开发与上线运维</li>
-                    <li>负责系统迁移、告警处理、版本发布等稳定性保障</li>
-                    <li>推动 Vibecoding / Speccoding / Harnesscoding 等 AI Coding 新模式在团队落地</li>
+                    <li>参与多个 AI Agent 项目的方案设计、核心开发与上线运维</li>
+                    <li>推动 Vibe Coding / Spec Coding / Harness Coding 等 AI Coding 新模式在团队落地</li>
                 </ul>
             </div>
         </div>
@@ -502,7 +563,7 @@
         <div class="section">
             <div class="section-title">Tech Stack</div>
             <div class="tags">
-                <span class="tag">Java</span><span class="tag">Python</span><span class="tag">Spring Boot</span><span class="tag">FastAPI</span><span class="tag">LangGraph</span><span class="tag">LangChain</span><span class="tag">MCP</span><span class="tag">A2A</span><span class="tag">RAG</span><span class="tag">Milvus</span><span class="tag">MySQL</span><span class="tag">Redis</span><span class="tag">Langfuse</span><span class="tag">AG-UI</span><span class="tag">Multi-Agent</span>
+                <span class="tag">Java</span><span class="tag">Python</span><span class="tag">Spring Boot</span><span class="tag">FastAPI</span><span class="tag">LangGraph</span><span class="tag">LangChain</span><span class="tag">MCP</span><span class="tag">RAG</span><span class="tag">Milvus</span><span class="tag">MySQL</span><span class="tag">Redis</span><span class="tag">Langfuse</span><span class="tag">AG-UI</span>
             </div>
         </div>
 
@@ -510,56 +571,41 @@
         <div class="section">
             <div class="section-title">Projects</div>
 
-            <!-- 创解智能体 -->
+            <!-- TRIZ 智能体 -->
             <div class="project-block">
                 <div class="project-head">
-                    <span class="project-name">创解智能体</span>
-                    <span class="project-type">Supervisor Multi-Agent</span>
-                    <span class="exp-date" style="margin-left: auto;">2024.10 – 至今</span>
+                    <span class="project-name">TRIZ 智能体（TRIZ Agent）</span>
+                    <span class="exp-date" style="margin-left: auto;">2024.10 – 2025.07</span>
                 </div>
-                <div class="project-desc">
-                    基于 TRIZ 创新理论构建的智能体，面向内部研究人员/设计人员，实现技术问题分析与求解、创新解决方案自动生成。
+                <div class="tags" style="margin: 2px 0 8px 0;">
+                    <span class="tag">LangGraph</span><span class="tag">Stage-Gating</span><span class="tag">ReAct</span><span class="tag">Milvus</span><span class="tag">Langfuse</span>
                 </div>
-                <ul class="exp-list">
-                    <li>主导 Agent 技术方案设计：LLM 选型、Agent 框架选型、执行模式设计</li>
-                    <li>主导 RAG 模块设计与实现：多域并发检索，解决纯语义匹配的业务相关性差问题</li>
-                    <li>基于 MCP 协议对接企业内部工具，工具可插拔、跨 Agent 复用</li>
+                <ul class="kv-list">
+                    <li><b>概述：</b>TRIZ 是一套成熟的创新问题求解理论。TRIZ 智能体将其建模为三阶段多轮对话 Agent<span class="np">：以</span> Stage-Gating 门控机制串联求解流程，阶段内采用 ReAct 范式驱动推理与工具调用，并结合专利知识库 RAG，为研究人员生成可靠的创新解决方案。</li>
+                    <li><b>TOT（Tree of Thoughts）：</b>方案生成阶段并行展开多条候选解题分支，逐层评估、剪枝与回溯，最终收敛至最优创新方案，突破单路径生成的多样性局限。</li>
+                    <li><b>Multi-Domain RAG：</b>与高校合作研发多域检索增强算法，将专利与用户问题映射到同一套求解模型，提取解决方案主框架、分离作用主体，从本域、近域、远域三域进行检索融合，突破传统 Hybrid Retrieval 方案同质化、创新性不足的瓶颈。</li>
+                    <li><b>Tagging &amp; Embedding：</b>基于 Milvus + MySQL 构建独立专利知识库，完成专利知识的 TRIZ Tagging 与向量化入库流水线。</li>
+                    <li><b>异步任务执行器：</b>通过 Redis + 线程池构建异步任务链路，实现 LLM 调用的统一并发控制。</li>
+                    <li><b>异常循环检测：</b>实时监控 ReAct 循环，识别重复工具调用/推理死循环后自动干预并切换策略<span class="np">，避免</span> Token 无效消耗与任务卡死。</li>
                 </ul>
             </div>
 
-            <!-- 研究智能体 -->
+            <!-- 深度研究智能体 -->
             <div class="project-block">
                 <div class="project-head">
-                    <span class="project-name">研究智能体</span>
-                    <span class="project-type">Plan-and-Execute</span>
+                    <span class="project-name">深度研究智能体（Deep Research Agent）</span>
                     <span class="exp-date" style="margin-left: auto;">2025.08 – 2026.04</span>
                 </div>
-                <div class="project-desc">
-                    面向研究人员的智能体，支持信息检索、研究报告与技术分析产出。联动云文档读写，支持文档问答与自动写入。
+                <div class="tags" style="margin: 2px 0 8px 0;">
+                    <span class="tag">LangGraph</span><span class="tag">HITL Plan &amp; Execute</span><span class="tag">MCP</span><span class="tag">Langfuse</span>
                 </div>
-                <ul class="exp-list">
-                    <li>主导 Agent 技术方案设计，包括 LLM 选型、框架选型、执行模式设计</li>
-                    <li>HITL 反馈机制：通过人工节点进行 Plan Review 与工具调用确认</li>
-                    <li>并行检索：通过 Map-Reduce 实现单节点并发任务执行与结果聚合</li>
-                    <li>基于 A2A 协议实现多 Agent 协作，能力可发现、任务可异步</li>
-                </ul>
-            </div>
-
-            <!-- AI 审核智能体 -->
-            <div class="project-block">
-                <div class="project-head">
-                    <span class="project-name">AI 审核智能体</span>
-                    <span class="project-type">Pipeline / Async</span>
-                    <span class="exp-date" style="margin-left: auto;">2026.06 – 至今</span>
-                </div>
-                <div class="project-desc">
-                    由业务系统驱动的 AI 审核智能体，面向工程图纸（PDF/JPG/PNG）和各类文档交付物，结合审核规则提供 AI 审核能力及品类规则学习能力。
-                </div>
-                <ul class="exp-list">
-                    <li>主导 Agent 技术方案设计：LLM 选型、框架选型、执行模式设计</li>
-                    <li>分布式任务处理：消息队列异步削峰，CAS+Lease 解决重复入队问题</li>
-                    <li>图片信息提取：优先分割子图提取，整图兜底，降低误识别率</li>
-                    <li>任务恢复机制：系统重启异常任务自动入队，定时扫描异常任务重新入队</li>
+                <ul class="kv-list">
+                    <li><b>概述：</b>对标 Google Notebook，由 Retrieval Agent 与 Notebook Agent 双模块组成；用户提问后，Retrieval Agent 规划并执行检索方案（Plan &amp; Execute）获取相关文献，Notebook Agent 对文献进行深度研究（对比差异、逻辑梳理、报告总结等），在多轮对话中提取所需笔记并沉淀至团队/个人云文档，两种模式支持会话内热切换。</li>
+                    <li><b>上下文摘要与卸载：</b>每轮对话自动进行摘要替换，原文按需加载；加载前增量计算 Token，若上下文窗口占用超出 80% 则触发截断，仅保留近 3 轮摘要后再次计算，直至满足预算。</li>
+                    <li><b>文档分层摘要树：</b>为每篇文献构建分层摘要树，分批并发摘要，兼容非结构化文档；总结类任务只读摘要树不读原文，任意结论可经路径溯源至原文。</li>
+                    <li><b>引用溯源：</b>生成结论强制附带文献引用（[文献, 章节]），可验证、防幻觉。</li>
+                    <li><b>LLM 适配器：</b>设计 Adaptor 层统一接入不同厂商的 LLM，屏蔽接口差异，实现 LLM 无感切换。</li>
+                    <li><b>可观测性：</b>全链路 Trace 记录每步 Prompt、工具调用、耗时与 Token 消耗，支撑瓶颈与异常定位。</li>
                 </ul>
             </div>
         </div>
